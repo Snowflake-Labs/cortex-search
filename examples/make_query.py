@@ -124,13 +124,6 @@ def main():
         required=True,
     )
     parser.add_argument(
-        "-f",
-        "--filter",
-        help="Filter string",
-        default="",
-        required=False,
-    )
-    parser.add_argument(
         "-q",
         "--query",
         help="Query string",
@@ -146,7 +139,6 @@ def main():
     args = parser.parse_args()
 
     request_body = {
-        "filter": args.filter,
         "columns": args.columns.split(","),
         "query": args.query,
         "limit": args.limit,
