@@ -9,8 +9,11 @@ import json
 sys.path.append(str(Path(__file__).parent.parent))
 from src.utils import jwtutils, queryutils
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Interactive Cortex Search Service API Query CLI")
+    parser = argparse.ArgumentParser(
+        description="Interactive Cortex Search Service API Query CLI"
+    )
     parser.add_argument(
         "-u",
         "--url",
@@ -53,6 +56,12 @@ def main():
         help="Query string",
         required=True,
     )
+    parser.add_argument(
+        "-r",
+        "--role",
+        help="User role to use for queries. If provided, a session token scoped to this role will be generated for authenticating to the API.",
+        required=False,
+    )
 
     args = parser.parse_args()
 
@@ -62,13 +71,14 @@ def main():
         args.account,
         args.user_name,
         args.qualified_service_name,
+        args.role,
     )
 
     print("\n\nWelcome to the interactive Cortex Search Service query CLI!\n\n")
 
     while True:
         query_input = input("Enter your search query or type 'exit' to quit: ").strip()
-        if query_input.lower() == 'exit':
+        if query_input.lower() == "exit":
             print("Exiting the program.")
             break
 

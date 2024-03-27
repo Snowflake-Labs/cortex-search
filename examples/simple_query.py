@@ -14,7 +14,7 @@ def main():
     parser.add_argument(
         "-u",
         "--url",
-        help="Snowflake account URL",
+        help="Snowflake account URL that uses the account locator",
         required=True,
     )
     parser.add_argument(
@@ -59,6 +59,12 @@ def main():
         help="Max number of results to return",
         required=True,
     )
+    parser.add_argument(
+        "-r",
+        "--role",
+        help="User role to use for queries. If provided, a session token scoped to this role will be generated for authenticating to the API.",
+        required=False,
+    )
 
     args = parser.parse_args()
 
@@ -74,8 +80,9 @@ def main():
         args.account,
         args.user_name,
         args.qualified_service_name,
+        args.role,
     )
-    response = search_service.search(request_body=request_body, retry_for_invalid_jwt=False)
+    response = search_service.search(request_body=request_body)
 
     if response is not None:
         print(json.dumps(response.json(), indent=4))
