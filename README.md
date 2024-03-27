@@ -33,9 +33,11 @@ Additionally, you must generate a private key for JWT auth with Snowflake as des
 ## Usage
 
 ### 1. Notebook usage
+
 The [examples/notebook_query.ipynb file](https://github.com/Snowflake-Labs/cortex-search/blob/main/examples/notebook_query.ipynb) shows an example of querying the service from within a Jupyter Notebook.
 
 ### 2. Command line usage
+
 The `simple_query.py` example script can be executed from the command line. For instance:
 
 ```
@@ -52,6 +54,7 @@ python3 examples/simple_query.py -u https://my_org-my_account.us-west-2.aws.snow
 - `-a`, `--account`: Snowflake account name. See [this guide](https://docs.snowflake.com/en/user-guide/admin-account-identifier#finding-the-organization-and-account-name-for-an-account) for finding your Account name
 - `-k`, `--private-key-path`: Path to the RSA private key file for authentication.
 - `-n`, `--user-name`: Username for the Snowflake account
+- `-r`, `--role`: Role to use for the query. If provided, a session token scoped to this role will be created and used for authentication to the API.
 
 The `interactive_query.py` example provides an interactive CLI that demonstrates caching the JWT used for authentication between requests for better performance and implements retries when the JWT has expired. You can run it like the following:
 
