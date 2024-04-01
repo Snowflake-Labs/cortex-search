@@ -3,7 +3,7 @@ cffi==1.16.0
 charset-normalizer==3.3.2
 cryptography==42.0.5
 idna==3.6
-pandas=2.2.1
+pandas==2.2.1
 pycparser==2.21
 PyJWT==2.8.0
 python-dotenv==1.0.1
