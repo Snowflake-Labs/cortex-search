@@ -122,7 +122,7 @@ class CortexSearchService:
             return response
         except requests.exceptions.HTTPError as http_err:
             # An invalid JWT may be due to expiration of the cached JWT.
-            if retry_for_invalid_jwt and self.is_invalid_jwt_response(response):
+            if retry_for_invalid_jwt and self._is_invalid_jwt_response(response):
                 # Only retry with a fresh JWT once.
                 print("JWT invalid, trying with a fresh JWT...")
                 self.cached_jwt = None
