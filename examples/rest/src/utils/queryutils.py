@@ -81,7 +81,6 @@ class CortexSearchService:
         if self.session_token is None:
             self.session_token = self._create_session_token()
         headers = {
-            "X-Snowflake-Authorization-Token-Type": "OAUTH",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Authorization": f'Snowflake Token="{self.session_token}"',
@@ -95,7 +94,7 @@ class CortexSearchService:
         return res["token"]
 
     def _make_query_url(self) -> str:
-        return f"{self.base_url}/api/v2/cortex/search/databases/{self.database}/schemas/{self.schema}/services/{self.service}"
+        return f"{self.base_url}/api/v2/databases/{self.database}/schemas/{self.schema}/cortex-search-services/{self.service}:query"
 
     def _make_sessions_url(self) -> str:
         return f"{self.base_url}/api/v2/sessions"
