@@ -1,4 +1,4 @@
-# Cortex Search
+# Cortex Search REST usage
 
 This directory contains example usage for the Cortex Search REST API using pure python (and libraries such as `requests`). Authentication for this method requires a JWT as described below.
 
@@ -10,12 +10,13 @@ Before you can run the examples, ensure you have the following prerequisites ins
 - pip (Python package installer)
   Additionally, you must have access to a Snowflake account and the required permissions to query the Cortex Search Service at the specified database and schema.
 
-Installation
-First, clone this repository to your local machine using git:
+## Installation
+
+First, clone this repository to your local machine using git and navigate to this directory:
 
 ```
 git clone https://github.com/snowflake-labs/cortex-search.git
-cd cortex-search
+cd cortex-search/examples/rest
 ```
 
 Install the necessary Python dependencies by running:

@@ -1,0 +1,7 @@
+[example_connection]
+account = "ABC12345"
+user = "my_username"
+password = "..."
+database = "my_db"
+schema = "my_schema"
+role = "my_role"
