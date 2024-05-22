@@ -1,12 +1,4 @@
-# Cortex Search
-
-This repository contains example usage, including authentication, for Cortex Search, currently in Private Preview. The official preview documentation can be [found here](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/cortex-search-overview).
-
-This repository contains the following examples:
-- [01. Querying the REST API](/01_querying_rest_api/README.md)
-- [02. Querying the Python API](/02_querying_python_api/README.md)
-- [03. Building an AI search app in Streamlit](/03_streamlit_ai_search/README.md)
-
+# Querying the Cortex Search REST API
 
 ## Prerequisites
 
@@ -21,7 +13,7 @@ First, clone this repository to your local machine using git:
 
 ```
 git clone https://github.com/snowflake-labs/cortex-search.git
-cd cortex-search
+cd cortex-search/01_querying_rest_api
 ```
 
 Install the necessary Python dependencies by running:
@@ -36,13 +28,7 @@ Additionally, you must generate a private key for JWT auth with Snowflake as des
 
 **Note**: take note of the path to your generated RSA private key, e.g., `/path/to/my/rsa_key.p8` -- you will need to supply this as the `--private-key-path` parameter to query the service later from the command line, or list the path to the file from within a notebook.
 
-## Usage
-
-### 1. Notebook usage
-
-The [examples/notebook_query.ipynb file](https://github.com/Snowflake-Labs/cortex-search/blob/main/examples/notebook_query.ipynb) shows an example of querying the service from within a Jupyter Notebook.
-
-### 2. Command line usage
+## Command line usage
 
 The `simple_query.py` example script can be executed from the command line. For instance:
 
