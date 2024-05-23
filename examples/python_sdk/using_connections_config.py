@@ -5,6 +5,7 @@ from snowflake.connector import connect
 from snowflake.connector.config_manager import CONFIG_MANAGER
 from snowflake.core import Root
 
+# Load the Cortex Search Service name from your environment
 svc = os.environ["SNOWFLAKE_CORTEX_SEARCH_SERVICE"]
 
 # Replace with your search parameters

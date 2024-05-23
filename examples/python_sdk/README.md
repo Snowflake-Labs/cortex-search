@@ -2,21 +2,16 @@
 
 This directory contains example usage for the Cortex Search REST API via the `snowflake.core` python package. `snowflake.core` supports authentication and connection to a Snowflake account through several different mechanisms, a few of which are outlined in the examples.
 
+Notably, the Cortex Search API is only available in versions of `snowflake.core >= 0.8.0`.
+
 ## Prerequisites
 
 Before you can run the examples, ensure you have the following prerequisites installed:
 
 - Python 3.11
 - pip (Python package installer)
-  Additionally, you must have access to a Snowflake account and the required permissions to query the Cortex Search Service at the specified database and schema.
 
-## Prerequisites
-
-Before you can run the script, ensure you have the following prerequisites installed:
-
-- Python 3.x
-- pip (Python package installer)
-  Additionally, you must have access to a Snowflake account and the required permissions to query the Cortex Search Service at the specified database and schema.
+Additionally, you must have access to a Snowflake account and the required permissions to query the Cortex Search Service at the specified database and schema.
 
 ## Installation
 
@@ -61,9 +56,9 @@ python simple.py
 
 To set up a `connections.toml` file to store aliased Snowflake connections and all the parameters needed to connect, see the snowflake connector docs: https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-connect#connecting-using-the-connections-toml-file
 
-An example is found under `example_connections.toml`, but make sure to name yours `connections.toml` and ensure it is located at a valid system-dependent path as specified in the snowflake connector docs.
+An example is found under `example_connections.toml`, but make sure to name yours `connections.toml` and ensure it is located at a valid system-dependent path as specified in the Snowflake connector docs.
 
-Then, export your cortex search service name (assuming the database and schema are already in your connection parameters):
+Then, export your Cortex Search Service name (assuming the database and schema are already in your connection parameters):
 
 ```
 export SNOWFLAKE_CORTEX_SEARCH_SERVICE=my_service
