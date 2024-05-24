@@ -1,0 +1,10 @@
+name: cortex-search-env
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+    - snowflake-snowpark-python
+    - streamlit
+    - snowflake
+    - snowflake-ml-python
+    - snowflake-connector-python
