@@ -10,6 +10,9 @@ MODELS = [
 
 @st.cache_resource
 def make_session():
+    """
+    Initialize the connection to snowflake using the `conn` connection stored in `.streamlit/secrets.toml`
+    """
     conn = st.connection("conn", type="snowflake")
     return conn.session()
 
@@ -32,6 +35,9 @@ def init_layout():
     st.sidebar.markdown(f"Current database and schema: `{db}.{schema}`".replace('"', ''))
 
 def init_config_options():
+    """
+    Initialize sidebar configuration options
+    """
     st.text_area("Search:", value="", key="query", height=100)
     st.sidebar.selectbox("Cortex Search Service", get_available_search_services(), key="cortex_search_service")
     st.sidebar.number_input("Results", value=5, key="limit", min_value=3, max_value=10)
@@ -39,6 +45,9 @@ def init_config_options():
     st.sidebar.toggle("Summarize", key="summarize", value = False)
 
 def query_cortex_search_service(query):
+    """
+    Queries the cortex search service in the session state and returns a list of results
+    """
     cortex_search_service = (
         root
         .databases[db]
@@ -49,6 +58,9 @@ def query_cortex_search_service(query):
     return context_documents.results
 
 def complete(model, prompt):
+    """
+    Queries the cortex COMPLETE LLM function with the provided model and prompt
+    """
     try:
         resp = session.sql("select snowflake.cortex.complete(?, ?)", params=(model, prompt)).collect()[0][0]
     except Exception as e:
@@ -56,6 +68,9 @@ def complete(model, prompt):
     return resp
 
 def summarize_search_results(results, query, search_col):
+    """
+    Returns an AI summary of the search results based on the user's query
+    """
     search_result_str = ""
     for i, r in enumerate(results):
         search_result_str += f"Case study {i+1}: {r[search_col]} \n"
@@ -89,13 +104,18 @@ def summarize_search_results(results, query, search_col):
     return resp
 
 def display_summary(summary):
+    """
+    Display the AI summary in the UI
+    """
     st.subheader("AI summary")
     container = st.container(border=True)
     container.markdown(summary)
 
 def display_search_results(results, search_col):
+    """
+    Display the search results in the UI
+    """
     st.subheader("Search results")
-
     for i, result in enumerate(results):
         container = st.expander(f"Result {i+1}", expanded=True)
         container.markdown(result[search_col])
@@ -104,6 +124,7 @@ def main():
     init_layout()
     init_config_options()
     
+    # run chat engine
     if not st.session_state.query:
         return
     results = query_cortex_search_service(st.session_state.query)
