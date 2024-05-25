@@ -1,24 +1,5 @@
 import streamlit as st # Import python packages
 from snowflake.core import Root
-from snowflake.cortex import Complete
-
-import time
-
-
-# SERVICES = [
-#     "sdr_case_studies",
-# ]
-
-# COLUMNS = [
-#     "content_date", 
-#     "snowflake_customer",
-#     "content_title",
-#     "content_url",
-#     "customer_story",
-#     "industry",
-#     "region",
-#     "search_col"
-# ]
 
 MODELS = [
     "mistral-large",
