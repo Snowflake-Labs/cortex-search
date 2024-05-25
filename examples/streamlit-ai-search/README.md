@@ -1,8 +1,10 @@
 # Cortex Search in Streamlit
+This guide shows you how to build a basic AI-powered search and summarization in streamlit using Snowflake Cortex.
+The app allows the user to select an existing [Cortex Search Service](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/cortex-search-overview) as the backend for their semantic search experience. Optionally, the user can toggle on the `Summarize`
+feature to provide an AI-generated summary of search results.
 
 ## Prerequisites
-
-- Anaconda
+- Ensure you have [Anaconda](https://docs.anaconda.com/free/anaconda/install/index.html) installed prior to running this demo
 
 ## Setup:
 
