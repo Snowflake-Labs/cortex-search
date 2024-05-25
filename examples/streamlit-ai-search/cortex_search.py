@@ -73,7 +73,7 @@ def summarize_search_results(results, query, search_col):
     """
     search_result_str = ""
     for i, r in enumerate(results):
-        search_result_str += f"Case study {i+1}: {r[search_col]} \n"
+        search_result_str += f"Result {i+1}: {r[search_col]} \n"
 
     prompt = f"""
         [INST]
