@@ -34,7 +34,7 @@ def main():
 
     # Read a set of queries to be executed on the service above.
     queries = []
-    with open("queries.out", "r") as f:
+    with open("queries", "r") as f:
         queries = f.readlines()
 
     # Execute queries in parallel with up to 20 concurrent threads
