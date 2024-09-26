@@ -6,3 +6,5 @@
 **/venv/
 **/connections.toml
 **/.streamlit/secrets.toml
+**/.env
+**/queries
