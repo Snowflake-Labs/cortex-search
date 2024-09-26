@@ -92,13 +92,14 @@ python using_connections_config.py
 requests on your cortex search service along with throttling the
 request rate when the server is busy.
 
-This example collects connection parameters from a file.  Add the
+This example collects default connection parameters from a file.  Add the
 following lines to a file named `.env` in the current directory:
 
 ```
 SNOWFLAKE_ACCOUNT=AID123456
 SNOWFLAKE_USER=myself
-SNOWFLAKE_PASSWORD=pass123...
+SNOWFLAKE_AUTHENTICATOR=
+SNOWFLAKE_PASSWORD=
 SNOWFLAKE_ROLE=my_role
 SNOWFLAKE_DATABASE=my_db
 SNOWFLAKE_SCHEMA=my_schema
@@ -120,6 +121,14 @@ songs in the key of life
 You can then run `concurrent-example.py` file to print search results:
 
 ```
-python concurren-examplet.py
+python concurrent-example.py --columns col1 col2
 ```
 
+You can override the connection parameters specified in `.env` file with command line parameters. Try:
+
+
+```
+python concurrent-example.py -h
+```
+
+to enumerate the list of command line options.
