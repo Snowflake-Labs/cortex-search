@@ -22,15 +22,13 @@ def main():
     load_dotenv("./.env")
 
     session = Session.builder.configs({
+        "host": os.getenv("SNOWFLAKE_HOST"),
         "account": os.getenv("SNOWFLAKE_ACCOUNT", "CORTEXSEARCH"),
         "user": os.getenv("SNOWFLAKE_USER", os.getenv("USER")),
         "password": os.getenv("SNOWFLAKE_PASSWORD"),
     }).create()
     root = Root(session)
-    search_service = root.databases[os.getenv("SNOWFLAKE_DATABASE")]
-                     .schemas[os.getenv("SNOWFLAKE_SCHEMA")]
-                     .cortex_search_services[os.getenv("SNOWFLAKE_CORTEX_SEARCH_SERVICE")]
-
+    search_service = root.databases[os.getenv("SNOWFLAKE_DATABASE")].schemas[os.getenv("SNOWFLAKE_SCHEMA")].cortex_search_services[os.getenv("SNOWFLAKE_CORTEX_SEARCH_SERVICE")]
 
     # Read a set of queries to be executed on the service above.
     queries = []

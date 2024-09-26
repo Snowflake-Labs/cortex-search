@@ -88,9 +88,9 @@ python using_connections_config.py
 
 ### 3. Executing concurrent queries with throttling
 
-`concurrent.py` is an example for running concurrent search requests on
-your cortex search service along with throttling the request rate when
-the server is busy.
+`concurrent-example.py` is an example for running concurrent search
+requests on your cortex search service along with throttling the
+request rate when the server is busy.
 
 This example collects connection parameters from a file.  Add the
 following lines to a file named `.env` in the current directory:
@@ -117,9 +117,9 @@ blue
 songs in the key of life
 ```
 
-You can then run `concurrent.py` file to print search results:
+You can then run `concurrent-example.py` file to print search results:
 
 ```
-python concurrent.py
+python concurren-examplet.py
 ```
 
