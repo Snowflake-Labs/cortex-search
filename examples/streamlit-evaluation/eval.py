@@ -1113,7 +1113,7 @@ def get_metrics_for_k(df: pd.DataFrame, k: str) -> Tuple[int]:
 
 
 def display_english_metrics(df: pd.DataFrame, k_value: str) -> None:
-    """Displays the metrics with explanations."""
+    """Displays the metrics with explanations for a chosen k."""
     ndcg_value, recall_value, precision_value, hit_rate_value = get_metrics_for_k(
         df, k_value
     )
@@ -1197,7 +1197,7 @@ def show_qid_info(row, pq_df: pd.Series):
         qid_result = qid_result_pandas.style.apply(
             color_code_columns,
             axis=1,
-            columns=[QUERY, QUERY_ID, st.session_state.css_text_col, FINAL_SCORE],
+            columns=qid_result_pandas.columns,
         )
         st.dataframe(
             qid_result,
