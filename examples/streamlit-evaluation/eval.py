@@ -14,7 +14,7 @@ import streamlit as st
 from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.exceptions import SnowparkSessionException
 from snowflake.snowpark.exceptions import SnowparkSQLException
-from snowflake.snowpark.functions import col, max as spmax, udf
+from snowflake.snowpark.functions import col, max as spmax, udf, lit
 from snowflake.snowpark.session import Session
 from snowflake.snowpark.table import Table
 from snowflake.snowpark.dataframe import DataFrame
@@ -48,9 +48,8 @@ TABLE_INPUT_PLACEHOLDER = "in format db.schema.table"
 QUERIES_TABLE_COLUMNS = (QUERY,)  # ',' allows casting this into a set later
 RELEVANCY_TABLE_COLUMNS = (
     QUERY,
-    DOC_ID,
     RELEVANCY,
-)
+)  # Third column of relevancy table can be either of DOC_ID or TEXT
 SCRAPE_TABLE_COLUMNS = (
     RUN_ID,
     QUERY_ID,
@@ -248,9 +247,9 @@ def color_code_columns(row: pd.Series, columns: List[str]) -> List[str]:
 
     if row[QUERY_ID] in st.session_state.colors:
         doc_colors = st.session_state.colors[row[QUERY_ID]]
-
-        if row[DOC_ID] in doc_colors:
-            color = doc_colors[row[DOC_ID]]
+        doc_id = str(row[DOC_ID])
+        if doc_id in doc_colors:
+            color = doc_colors[doc_id]
             for column in columns:
                 column_index = row.index.get_loc(column)
                 styles[column_index] = f"background-color: {color}"
@@ -314,8 +313,8 @@ def validate_css_id_col() -> bool:
         result = session.sql(
             f"DESCRIBE CORTEX SEARCH SERVICE {st.session_state.css_fqn}"
         ).collect()
-        css_columns = set(col.lower() for col in result[0][7].split(","))
-        return st.session_state.css_id_col.lower() in css_columns
+        css_columns = set(col.upper() for col in result[0][7].split(","))
+        return st.session_state.css_id_col.upper() in css_columns
     except Exception as e:
         st.write(f"An error occurred: {e}")
         return False
@@ -488,11 +487,14 @@ def perform_scrape(query_table: Table, root: Root) -> List[Dict[str, Any]]:
         query, query_id = row[QUERY], row[QUERY_ID]
 
         # Perform the search request
+        columns = [st.session_state.css_text_col]
+        if st.session_state.css_id_given:
+            columns.append(st.session_state.css_id_col)
+
         response = svc.search(
             query,
             limit=st.session_state.result_limit,
-            columns=[st.session_state.css_text_col, st.session_state.css_id_col]
-            + st.session_state.additional_columns,
+            columns=columns + st.session_state.additional_columns,
             filter=st.session_state.filter,
             # Todo(amehta): input experimental args and use them here
             # debug set to True to display debug signals
@@ -500,11 +502,18 @@ def perform_scrape(query_table: Table, root: Root) -> List[Dict[str, Any]]:
         )
         # Append each result to the scrape output
         for rank, result in enumerate(response.results):
+            if st.session_state.css_id_given:
+                doc_id = str(result[st.session_state.css_id_col])
+            else:
+                doc_id = hashlib.md5(
+                    str(result[st.session_state.css_text_col]).encode("utf-8")
+                ).hexdigest()
+
             scrape_out.append(
                 {
                     RUN_ID: st.session_state.scrape_run_id,
                     QUERY_ID: query_id,
-                    DOC_ID: result[st.session_state.css_id_col],
+                    DOC_ID: doc_id,
                     RANK: rank + 1,
                     DEBUG_SIGNALS: result[DEBUG_PER_RESULT],
                     st.session_state.css_text_col.upper(): result[
@@ -522,9 +531,7 @@ def store_scrape_results(scrape_out: List[Dict[str, Any]], session: Session) -> 
     scrape_df.write.mode("append").save_as_table(st.session_state.scrape_fqn)
 
     duration = datetime.now() - st.session_state.start_time
-    st.success(
-        f"Finished scrape in {round(duration.total_seconds(),1)} seconds, stored in `{st.session_state.scrape_fqn}` with Run ID = {st.session_state.scrape_run_id}"
-    )
+    st.success(f"Finished scrape in {round(duration.total_seconds(),1)} seconds")
 
 
 def generate_and_store_scrape(session: Session, root: Root) -> None:
@@ -537,11 +544,20 @@ def generate_and_store_scrape(session: Session, root: Root) -> None:
     store_scrape_results(scrape_out, session)
 
 
+def refresh_state_to_pre_eval():
+    st.session_state.rel_scores = {}
+    st.session_state.colors = {}
+
+
 def run_eval(relevancy_fqn: str, result_fqn: str, run_comment: str) -> None:
     """Run evaluation on scraped results against golden standards."""
     start_time = datetime.now()
-    query_table, scrape_df = initialize_tables(session)
 
+    # There might be an older eval which was run, hence some values might be saved in session_state
+    # clear them up
+    refresh_state_to_pre_eval()
+
+    query_table, scrape_df = initialize_tables(session)
     validate_scrape(scrape_df)
 
     st.session_state.result_limit = get_result_limit(scrape_df)
@@ -563,7 +579,12 @@ def run_eval(relevancy_fqn: str, result_fqn: str, run_comment: str) -> None:
     }
 
     st.success(
-        f"Evaluation finished in {round(duration.total_seconds(), 1)} seconds\nEval metrics are added to `{result_fqn}`"
+        f"""
+            **Evaluation finished in {round(duration.total_seconds(), 1)} seconds**
+
+            - **Aggregate Eval metrics** are added to `{result_fqn}`
+            - **Per Query Metrics** are added to `{result_fqn}_PERQUERY`
+            """,
     )
 
 
@@ -606,6 +627,12 @@ def prepare_relevancy_table(relevancy_fqn: str, session: Session) -> Table:
         relevancy_table = relevancy_table.withColumn(
             QUERY_ID, st.session_state.md5_hash(relevancy_table[QUERY])
         )
+    # If DOC_ID column is not provided, md5_hash the text column
+    if DOC_ID not in relevancy_table.columns:
+        relevancy_table = relevancy_table.withColumn(
+            DOC_ID,
+            st.session_state.md5_hash(relevancy_table[st.session_state.css_text_col]),
+        )
     return relevancy_table
 
 
@@ -620,10 +647,9 @@ def extract_and_dedupe_goldens(
         2: lightgreen,
         3: lightgreen,
     }
-
     for row in relevancy_table.collect():
         rel_score = int(row[RELEVANCY])
-        query_id, doc_id = row[QUERY_ID], row[DOC_ID]
+        query_id, doc_id = row[QUERY_ID], str(row[DOC_ID])
 
         # Dedup block:
         # Check if the current doc_id already exists for the query_id
@@ -687,7 +713,11 @@ def evaluate_queries(
         progress_bar.progress(progress_percentage)
 
         query_id = row[QUERY_ID]
-        scrape_for_query_df = scrape_df.filter(col(QUERY_ID) == query_id)
+
+        # Preserve rank ordering as you filter
+        scrape_for_query_df = scrape_df.filter(col(QUERY_ID) == query_id).order_by(
+            col(RANK)
+        )
 
         # Dedup doc_ids in result while persisting order
         scraped_results = list(
@@ -773,6 +803,11 @@ def persist_metrics(
     # Create DataFrame for per-query metrics and save it
     st.session_state.retrieval_metrics_per_query_df = session.create_dataframe(
         retrieval_metrics
+    )
+    st.session_state.retrieval_metrics_per_query_df = (
+        st.session_state.retrieval_metrics_per_query_df.with_column(
+            "RUN_ID", lit(st.session_state.scrape_run_id)
+        )
     )
     per_query_fqn = f"{result_fqn}_PERQUERY"
     st.session_state.retrieval_metrics_per_query_df.write.mode("append").save_as_table(
@@ -865,6 +900,8 @@ def initialize_session_state() -> None:
         "provide_scrape_clicked": False,
         "generate_scrape_clicked": False,
         "scrape_ready": False,
+        "css_id_given": False,
+        "css_id_clicked": False,
         "scrape_fqn": "",
         "scrape_run_id": "",
         "result_limit": -1,
@@ -878,6 +915,7 @@ def initialize_session_state() -> None:
         "prev_queryset_fqn": "",
         "prev_scrape_fqn": "",
         "prev_css_id_col": "",
+        "css_id_col": "",
         "k_value": 5,
     }
     for key, value in session_defaults.items():
@@ -891,9 +929,11 @@ def initialize_session_state() -> None:
 
 def display_header():
     st.title("Cortex Search Evaluation Support")
-    st.write(
+    st.markdown(
         """
-        Tool to evaluate the quality of Cortex Search Service against a set of queries
+        Tool to evaluate the quality of Cortex Search Service against a given of queries and relevancies
+
+        **Note:** All table names are needed in a fully qualified name format, ie, `<db>.<schema>.<table>`
         """
     )
     st.header("Inputs", divider=True)
@@ -908,19 +948,50 @@ def collect_input_fields() -> None:
         f"Enter the Queries table: Required cols = [{', '.join(QUERIES_TABLE_COLUMNS)}]",
         placeholder=TABLE_INPUT_PLACEHOLDER,
     )
-    st.session_state.css_id_col = st.text_input(
-        "Enter the ID column name used in Cortex Search Service: All the IDs must be unique"
+    st.markdown(
+        """
+        Do you have a Document ID column in your datasets? 
+
+        _This will be used to uniquely identify documents_
+        """
     )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes", key="id_yes"):
+            st.session_state.css_id_given = True
+            st.session_state.css_id_clicked = True
+            refresh_state_to_pre_scrape()
+
+    with col2:
+        if st.button("No", key="id_no"):
+            st.session_state.css_id_given = False
+            st.session_state.css_id_clicked = True
+            refresh_state_to_pre_scrape()
+
+    if not st.session_state.css_id_clicked:
+        st.stop()
+
+    if st.session_state.css_id_given:
+        st.session_state.css_id_col = st.text_input(
+            "Enter the ID column name used in Cortex Search Service: All the IDs must be unique",
+            disabled=(not st.session_state.css_id_given),
+        )
 
 
 def all_required_inputs_provided():
-    return all(
-        [
-            st.session_state.css_fqn,
-            st.session_state.queryset_fqn,
-            st.session_state.css_id_col,
-        ]
-    )
+    # Check base requirements
+    base_requirements = [
+        st.session_state.css_fqn,
+        st.session_state.queryset_fqn,
+    ]
+
+    # If css_id_given is True, css_id_col must also be provided
+    if st.session_state.css_id_given:
+        base_requirements.append(st.session_state.css_id_col)
+
+    # Return True only if all required inputs are provided
+    return all(base_requirements)
 
 
 def inputs_have_changed():
@@ -943,7 +1014,10 @@ def validate_inputs():
     validate_css(
         st.session_state.css_fqn,
     )
-    assert validate_css_id_col(), f"ID column = {st.session_state.css_id_col} does not exist for the Cortex Search Service = {st.session_state.css_fqn}"
+
+    if st.session_state.css_id_given:
+        assert validate_css_id_col(), f"ID column = {st.session_state.css_id_col} does not exist for the Cortex Search Service = {st.session_state.css_fqn}"
+
     st.session_state.css_text_col = get_search_column().upper()
     assert (
         len(st.session_state.css_text_col) > 0
@@ -966,9 +1040,10 @@ def display_verified_inputs():
 def extract_db_and_schema_from_fqn() -> List[str]:
     return st.session_state.css_fqn.split(".")[:2]
 
+    # If order to allow mutliple scraping to eval loops gracefully
 
-# If order to allow mutliple scraping to eval loops gracefully
-def refresh_state_to_pre_eval():
+
+def refresh_state_to_pre_scrape():
     st.session_state.scrape_ready = False
     st.session_state.aggregate_metrics_display_df = ""
     st.session_state.retrieval_metrics_per_query_df = ""
@@ -981,7 +1056,7 @@ def handle_scrape_input(db: str, schema: str):
     st.markdown(
         """
         Do you have a scrape?
-        A scrape table contains the Cortex Search results for all the queries provided in the Query Table
+        A scrape contains the Cortex Search results for all the queries provided in the Query Table
         
         _Consider clicking No if you're a first time user_
         """
@@ -992,13 +1067,13 @@ def handle_scrape_input(db: str, schema: str):
         if st.button("Yes"):
             st.session_state.provide_scrape_clicked = True
             st.session_state.generate_scrape_clicked = False
-            refresh_state_to_pre_eval()
+            refresh_state_to_pre_scrape()
 
     with col2:
         if st.button("No"):
             st.session_state.generate_scrape_clicked = True
             st.session_state.provide_scrape_clicked = False
-            refresh_state_to_pre_eval()
+            refresh_state_to_pre_scrape()
 
     if (
         st.session_state.provide_scrape_clicked
@@ -1015,12 +1090,21 @@ def process_scrape_workflow(db: str, schema: str):
         process_generate_scrape()
 
     if st.session_state.scrape_ready:
+        st.success(
+            f"Using scrape from table {st.session_state.scrape_fqn} with Run ID = {st.session_state.scrape_run_id}"
+        )
         process_eval_input(db, schema)
 
 
 def process_eval_input(db, schema):
+    required_relevancy_cols = set(RELEVANCY_TABLE_COLUMNS)
+    if st.session_state.css_id_given:
+        required_relevancy_cols.add(DOC_ID)
+    else:
+        required_relevancy_cols.add(st.session_state.css_text_col)
+
     relevancy_fqn = st.text_input(
-        f"Enter Relevancy table. This table which should have ground truth labels for the queries. Required columns = [{', '.join(RELEVANCY_TABLE_COLUMNS)}]",
+        f"Enter Relevancy table. This table which should have ground truth labels for the queries. Required columns = [{', '.join(required_relevancy_cols)}]",
         placeholder=TABLE_INPUT_PLACEHOLDER,
     )
     result_fqn = st.text_input(
@@ -1037,14 +1121,23 @@ def process_eval_input(db, schema):
             or st.session_state.scrape_run_id == ""
         ):
             st.stop()
+
         validate_table(
             fqn=relevancy_fqn,
             fqn_name="Relevancy table",
             session=session,
             must_exist=True,
-            required_cols=set(RELEVANCY_TABLE_COLUMNS),
+            required_cols=required_relevancy_cols,
         )
+
         if check_table_exists(result_fqn):
+            validate_table(
+                fqn=result_fqn,
+                fqn_name="Metrics table",
+                session=session,
+                must_exist=True,
+                required_cols=set(METRICS_TABLE_COLUMNS),
+            )
             st.markdown(
                 f"""
                 <div style='background-color: yellow; padding: 10px;'>
@@ -1052,13 +1145,6 @@ def process_eval_input(db, schema):
                 </div>
                 """,
                 unsafe_allow_html=True,
-            )
-            validate_table(
-                fqn=result_fqn,
-                fqn_name="Metrics table",
-                session=session,
-                must_exist=True,
-                required_cols=set(METRICS_TABLE_COLUMNS),
             )
         else:
             validate_table(
@@ -1095,7 +1181,7 @@ def extract_value_from_dict(debug_signals: str, key: str) -> Optional[Any]:
 
 def extract_relevancy_score(row: Dict[str, Any]) -> Union[int, str]:
     query_id = row[QUERY_ID]
-    doc_id = row[DOC_ID]
+    doc_id = str(row[DOC_ID])
     score = st.session_state.rel_scores.get(query_id, {}).get(doc_id, None)
 
     return int(score) if score is not None else "-"
@@ -1113,9 +1199,12 @@ def get_metrics_for_k(df: pd.DataFrame, k: str) -> Tuple[int]:
 
 
 def display_english_metrics(df: pd.DataFrame, k_value: str) -> None:
-    """Displays the metrics with explanations."""
+    """Displays the metrics with explanations for a chosen k."""
     ndcg_value, recall_value, precision_value, hit_rate_value = get_metrics_for_k(
         df, k_value
+    )
+    st.write(
+        f"**NDCG@{k_value} is {ndcg_value}** - Normalized Discounted Cumulative Gain (NDCG) measures the effectiveness of a search algorithm based on the positions of relevant results. Ranges from 0 (worst) to 1 (best)."
     )
 
     st.write(
@@ -1123,21 +1212,17 @@ def display_english_metrics(df: pd.DataFrame, k_value: str) -> None:
     )
 
     st.write(
-        f"**Precision@{k_value} is {precision_value}** which means that {precision_value*100}% of the documents retrieved in the top {k_value} results were relevant."
-    )
-
-    st.write(
         f"**Hit Rate@{k_value} is {hit_rate_value}** which means that in {hit_rate_value*100}% of queries, at least one relevant result was present in the top {k_value} retrieved items."
     )
 
     st.write(
-        f"**NDCG@{k_value} is {ndcg_value}** - Normalized Discounted Cumulative Gain (NDCG) measures the effectiveness of a search algorithm based on the positions of relevant results. Ranges from 0 (worst) to 1 (best)."
+        f"**Precision@{k_value} is {precision_value}** which means that {precision_value*100}% of the documents retrieved in the top {k_value} results were relevant."
     )
 
 
 def show_aggregate_results() -> None:
-    st.header("Evaluation Results", divider=True)
-    st.subheader("Section: Overall results", divider=True)
+    # st.header("Evaluation Results", divider=True)
+    st.header("Section: Static results", divider=True)
 
     metrics_display_aggregate = (
         st.session_state.aggregate_metrics_display_df.to_pandas()
@@ -1156,22 +1241,31 @@ def show_aggregate_results() -> None:
         metric: [metrics_display_aggregate[f"{metric}@{k}"].values[0] for k in k_values]
         for metric in VALID_METRICS
     }
-    st.markdown("""
+    st.subheader(
+        """
         **Aggregate Retrieval Metrics**
-        """)
+        """,
+        divider=True,
+    )
+    desired_order = [NDCG, RECALL, HIT_RATE, PRECISION]
     metrics_df = pd.DataFrame(metrics_data, index=[f"k={k}" for k in k_values])
+    metrics_df = metrics_df[desired_order]
+    # You can't order columns as part of st.dataframe here, because we want metrics to be rows and not columns
     st.dataframe(metrics_df.T)
 
-    st.divider()
-
-    st.markdown("""
+    st.subheader(
+        """
         **Run Metadata**
-        """)
+        """,
+        divider=True,
+    )
     st.write(
         (metrics_display_aggregate[[RUN_ID, TOTAL_QUERIES, COMMENT, RUN_METADATA]]).T
     )
-    st.subheader("Evaluation Metrics at chosen k", divider=True)
+
+    st.header("Section: Interactive results at chosen k", divider=True)
     st.session_state.k_value = st.selectbox("Choose the value of k:", k_values, index=1)
+    st.subheader("Aggregate Summary", divider=True)
     display_english_metrics(metrics_display_aggregate, str(st.session_state.k_value))
 
 
@@ -1197,7 +1291,7 @@ def show_qid_info(row, pq_df: pd.Series):
         qid_result = qid_result_pandas.style.apply(
             color_code_columns,
             axis=1,
-            columns=[QUERY, QUERY_ID, st.session_state.css_text_col, FINAL_SCORE],
+            columns=qid_result_pandas.columns,
         )
         st.dataframe(
             qid_result,
@@ -1239,15 +1333,14 @@ def show_query_level_results() -> None:
     metrics_per_query_pandas[QUERY] = metrics_per_query_pandas[QUERY_ID].map(
         st.session_state.queryid_to_query
     )
-    st.divider()
-
+    st.subheader("Per Query Metrics", divider=True)
     st.markdown("""
-    **Per Query Metrics:**
-
-    You can select a row using the left-most column to learn more about a specific query
+    You can select a row using the left-most index column to learn more about a specific query. 
+    
+    You could also click on any of the columns to sort on that column
     """)
     pq_series = extract_and_sort_metrics(metrics_per_query_pandas)
-    remaining_columns = set(pq_series.columns) - set([QUERY, QUERY_ID])
+    k_value = str(st.session_state.k_value)
 
     column_configs = {}
     for column in pq_series.columns:
@@ -1263,7 +1356,14 @@ def show_query_level_results() -> None:
         column_config=column_configs,
         on_select="rerun",
         selection_mode=["single-row"],
-        column_order=[QUERY, QUERY_ID] + list(remaining_columns),
+        column_order=[
+            QUERY,
+            QUERY_ID,
+            f"{NDCG}@{k_value}",
+            f"{RECALL}@{k_value}",
+            f"{HIT_RATE}@{k_value}",
+            f"{PRECISION}@{k_value}",
+        ],
     )
     show_qid_info(selected_row, pq_series)
 
