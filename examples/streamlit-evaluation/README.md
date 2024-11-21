@@ -1,7 +1,6 @@
 # Tutorial: Evaluating Cortex Search Quality with Streamlit
 
-Nov 18, 2024  
----
+_Last updated: Nov 21, 2024_
 
 This tutorial walks you through Cortex Search Quality evaluation in a Streamlit-in-Snowflake app. By the end of this tutorial, you will have generated and run a quantitative evaluation of search quality on your use-case for a given Cortex Search Service.
 
@@ -10,8 +9,8 @@ This tutorial walks you through Cortex Search Quality evaluation in a Streamlit-
 There are three objects you’ll need before beginning the evaluation process:
 
 * A [Cortex Search Service](https://docs.snowflake.com/user-guide/snowflake-cortex/cortex-search/cortex-search-overview)  
-* A query table (see below)  
-* A relevancy table (see below)
+* A query table ([example](https://docs.google.com/spreadsheets/d/1q4RMplovT5lyt-zC4Y-ncf_sl4f8qEn6ydIVwkCSqP8/edit?gid=214438211#gid=214438211), description below)  
+* A relevancy table ([example](https://docs.google.com/spreadsheets/d/1q4RMplovT5lyt-zC4Y-ncf_sl4f8qEn6ydIVwkCSqP8/edit?gid=0#gid=0), description below)
 
 ### Building a query table
 
@@ -20,6 +19,8 @@ First, you’ll need to have a query table. Queries are the basic “inputs” i
 | QUERY |
 | :---- |
 |  |
+
+See [here](https://docs.google.com/spreadsheets/d/1q4RMplovT5lyt-zC4Y-ncf_sl4f8qEn6ydIVwkCSqP8/edit?gid=214438211#gid=214438211) for an example of a small QUERY table.
 
 The best source of a query table is real-life customer queries. However, if you don’t have a list of real customer queries, you could consider generating them manually by reading through your document corpus and generating queries that should hit random documents, or synthetically with an LLM. One way to generate synthetic queries is to query an LLM for a given document using a prompt “*Given this text: {insert text here}, generate 5 natural search queries users might input to find this.*”
 
@@ -39,6 +40,8 @@ The relevancy table should have three columns, query, the text column name for t
 |  |  |  |
 
 Note: *`<CSS TEXT COLUMN NAME>`* is the name of the search column in your Cortex Search Service.
+
+See [here](https://docs.google.com/spreadsheets/d/1q4RMplovT5lyt-zC4Y-ncf_sl4f8qEn6ydIVwkCSqP8/edit?gid=0#gid=0) for an example of a small RELEVANCY table.
 
 Now that you have these three objects, you’re ready to get started with the evaluation process.
 
