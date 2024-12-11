@@ -1,21 +1,19 @@
 import unittest
 from unittest import TestCase
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 import math
 from eval import (
     hit_rate,
-    ndcg,
+    sdcg,
     precision,
-    recall,
     _dcg,
     generate_and_store_scrape,
-    prepare_query_table,
-    perform_scrape,
+    prepare_query_df,
+    perform_scrape_for_eval,
     store_scrape_results,
-    initialize_tables,
     validate_scrape,
     get_result_limit,
-    prepare_relevancy_table,
+    prepare_relevancy_df,
     extract_and_dedupe_goldens,
     prepare_golden_scores,
     evaluate_queries,
@@ -25,14 +23,16 @@ from eval import (
     RELEVANCY,
     RUN_ID,
     DOC_ID,
-    NDCG,
+    SDCG,
     PRECISION,
-    RECALL,
     DEBUG_PER_RESULT,
+    RESPONSE_RESULTS,
+    DEBUG_SIGNALS,
 )
 from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.snowpark import Table, DataFrame
+import hashlib
 
 
 TEXT = "text"
@@ -61,20 +61,21 @@ class TestMetrics(TestCase):
         # Test with empty results
         self.assertEqual(hit_rate(self.empty_results, self.golden_to_score), 0)
 
-    def test_ndcg(self):
-        # Calculate DCG and NDCG values for given results and golden data
-        expected_ndcg = _dcg(self.results, self.golden_to_score) / _dcg(
-            ["doc1", "doc2", "doc5"], self.golden_to_score
+    def test_sdcg(self):
+        # Calculate DCG and SDCG values for given results and golden data
+        expected_sdcg = _dcg(self.results, self.golden_to_score) / (3.0 * sum(
+            1.0/ math.log2(i + 2.0) for i in range(4)
+            )
         )
         self.assertAlmostEqual(
-            ndcg(self.results, self.golden_to_score), expected_ndcg, places=5
+            sdcg(3.0, self.results, self.golden_to_score), expected_sdcg, places=5
         )
 
-        # Test NDCG with empty results
-        self.assertEqual(ndcg(self.empty_results, self.golden_to_score), 0.0)
+        # Test SDCG with empty results
+        self.assertEqual(sdcg(3.0, self.empty_results, self.golden_to_score), 0.0)
 
-        # Test NDCG with empty golden set
-        self.assertEqual(ndcg(self.results, self.empty_golden), 0.0)
+        # Test SDCG with empty golden set
+        self.assertEqual(sdcg(3.0, self.results, self.empty_golden), 0.0)
 
     def test_precision(self):
         # 2 relevant documents (doc1, doc2), out of 4 total -> precision = 2/4 = 0.5
@@ -85,16 +86,6 @@ class TestMetrics(TestCase):
 
         # Test precision with empty results
         self.assertEqual(precision(self.empty_results, self.golden_to_score), 0.0)
-
-    def test_recall(self):
-        # 2 relevant documents (doc1, doc2) out of 4 golden -> recall = 2/4 = 0.5
-        self.assertAlmostEqual(recall(self.results, self.golden_to_score), 0.5)
-
-        # Test recall with no golden documents -> undefined recall, should return NaN
-        self.assertTrue(math.isnan(recall(self.results, self.empty_golden)))
-
-        # Test recall with no results
-        self.assertEqual(recall(self.empty_results, self.golden_to_score), 0.0)
 
     def test_dcg(self):
         # Test DCG for correct calculation
@@ -111,14 +102,14 @@ class TestScrapeFlow(TestCase):
     @patch("eval.get_active_session")
     @patch("eval.Root")
     @patch("streamlit.session_state", new_callable=MagicMock)
-    @patch("eval.prepare_query_table")
-    @patch("eval.perform_scrape")
+    @patch("eval.prepare_query_df")
+    @patch("eval.perform_scrape_for_eval")
     @patch("eval.store_scrape_results")
     def test_generate_and_store_scrape(
         self,
         mock_store_scrape_results,
-        mock_perform_scrape,
-        mock_prepare_query_table,
+        mock_perform_scrape_for_eval,
+        mock_prepare_query_df,
         mock_session_state,
         mock_root,
         mock_get_active_session,
@@ -128,9 +119,9 @@ class TestScrapeFlow(TestCase):
 
         # Mock return values
         mock_query_table = MagicMock(name="query_table")
-        mock_prepare_query_table.return_value = mock_query_table
+        mock_prepare_query_df.return_value = mock_query_table
         mock_scrape_out = [{"example_key": "example_value"}]
-        mock_perform_scrape.return_value = mock_scrape_out
+        mock_perform_scrape_for_eval.return_value = mock_scrape_out
 
         # Mock session and root
         mock_session = mock_get_active_session.return_value
@@ -140,17 +131,17 @@ class TestScrapeFlow(TestCase):
         generate_and_store_scrape(mock_session, mock_root_instance)
 
         # Assertions
-        mock_prepare_query_table.assert_called_once()
-        mock_perform_scrape.assert_called_once_with(
-            mock_query_table, mock_root_instance
+        mock_prepare_query_df.assert_called_once()
+        mock_perform_scrape_for_eval.assert_called_once_with(
+            mock_session, mock_query_table, mock_root_instance
         )
-        mock_store_scrape_results.assert_called_once_with(mock_scrape_out, mock_session)
+        mock_store_scrape_results.assert_called_once_with(mock_scrape_out)
 
     @patch("eval.get_active_session")  # Mock get_active_session
     @patch("eval.get_session")  # Mock get_session
     @patch("eval.Root")  # Mock Root
     @patch("streamlit.session_state", new_callable=MagicMock)  # Mock st.session_state
-    def test_prepare_query_table_creates_query_id_if_missing(
+    def test_prepare_query_df_creates_query_id_if_missing(
         self, mock_session_state, mock_root, mock_get_session, mock_get_active_session
     ):
         # Define mock properties for session state
@@ -164,274 +155,231 @@ class TestScrapeFlow(TestCase):
         # Mock the table method on the session
         mock_query_table = MagicMock()
         mock_query_table.columns = [QUERY]  # Simulate missing QUERY_ID initially
-        mock_query_table.withColumn.return_value = mock_query_table
+        mock_query_table.with_column.return_value = mock_query_table
 
         # Setup the session.table mock to return mock_query_table
         mock_session.table.return_value = mock_query_table
 
         # Call the function
-        result = prepare_query_table(mock_session)  # Pass the mock session
+        result = prepare_query_df(mock_session)  # Pass the mock session
 
         # Assertions
         mock_session.table.assert_called_once_with(
             "mock_fqn"
-        )  # Check if session.table was called correctly
-        mock_query_table.withColumn.assert_called_once()  # Check if withColumn was called
+        )  # Check if session.table was called with the correct fqn
+        mock_query_table.with_column.assert_called_once_with(
+            QUERY_ID, mock_session_state.md5_hash(mock_query_table[QUERY])
+        )  # Ensure with_column was called to add QUERY_ID using md5_hash
         self.assertEqual(
             result, mock_query_table
         )  # Ensure the result is the mock query_table
 
-    @patch("eval.get_active_session")
-    @patch("eval.Root")
-    @patch("eval.st.session_state", new_callable=MagicMock)
-    @patch("eval.st.progress")
-    @patch("eval.st.empty")
-    def test_perform_scrape(
-        self,
-        mock_empty,
-        mock_progress,
-        mock_session_state,
-        mock_root,
-        mock_get_active_session,
+    @patch(
+        "streamlit.session_state", new_callable=MagicMock
+    )  # Mock streamlit session_state
+    @patch("eval.Session", new_callable=MagicMock)  # Mock eval.Session
+    @patch("eval.perform_scrape", new_callable=MagicMock)  # Mock perform_scrape
+    def test_perform_scrape_for_eval(
+        self, mock_perform_scrape, mock_session, mock_session_state
     ):
         # Mock session state properties
-        mock_session_state.css_fqn = "mock_db.mock_schema.mock_service"
-        mock_session_state.result_limit = 10
-        mock_session_state.css_text_col = "text"
+        mock_session_state.css_id_given = True  # Simulate that CSS ID is given
         mock_session_state.css_id_col = DOC_ID
-        mock_session_state.additional_columns = []
-        mock_session_state.filter = None
-        mock_session_state.scrape_run_id = "mock_run_id"
+        mock_session_state.css_text_col = "text"  # Adjust based on your code
+        mock_session_state.css_fqn = "mock_db.mock_schema.mock_service"
 
-        # Mocking session and root
-        mock_root_instance = mock_root.return_value
+        # Mock input query DataFrame
+        mock_query_df = MagicMock()
+        mock_query_df.collect.return_value = [{QUERY: "test query", "QUERY_ID": "1"}]
 
-        # Mock service setup
-        mock_css_db, mock_css_schema, mock_css_service = (
-            mock_session_state.css_fqn.split(".")
-        )
-        mock_svc = MagicMock()
+        # Mock perform_scrape output
+        mock_perform_scrape.return_value = {
+            "1": {
+                QUERY: "test query",
+                RUN_ID: "mock_run_id",
+                RESPONSE_RESULTS: [
+                    {
+                        mock_session_state.css_text_col: "sample text",
+                        DEBUG_PER_RESULT: {"score": 0.9},
+                    }
+                ],
+            }
+        }
 
-        # Ensure cortex_search_services[service] returns mock_svc
-        mock_root_instance.databases[mock_css_db].schemas[
-            mock_css_schema
-        ].cortex_search_services = {mock_css_service: mock_svc}
-
-        # Mock the search result
-        mock_search_result = MagicMock()
-        mock_search_result.results = [
+        # Expected output
+        expected_output = [
             {
-                mock_session_state.css_id_col: "123",
-                mock_session_state.css_text_col: "sample text",
-                DEBUG_PER_RESULT: "signal_data",
+                QUERY: "test query",
+                RUN_ID: "mock_run_id",
+                QUERY_ID: "1",
+                DOC_ID: hashlib.md5("sample text".encode("utf-8")).hexdigest(),
+                "RANK": 1,
+                DEBUG_SIGNALS: {"score": 0.9},
+                "TEXT": "sample text",
             }
         ]
-        mock_svc.search.return_value = mock_search_result
 
-        # Mock query table collection
-        mock_query_table = MagicMock()
-        mock_query_table.collect.return_value = [{QUERY: "test query", QUERY_ID: "1"}]
-        mock_progress().progress.side_effect = lambda x: None
-        mock_empty().text.side_effect = lambda x: None
+        # Mock the DataFrame creation
+        mock_scrape_df = MagicMock()
+        mock_session.create_dataframe.return_value = mock_scrape_df
 
-        scrape_out = perform_scrape(mock_query_table, mock_root_instance)
-        print(scrape_out)
-
-        mock_svc.search.assert_called_once()  # Validate search was called
-        self.assertEqual(len(scrape_out), 1)  # Confirm one result was returned
-        self.assertEqual(scrape_out[0][QUERY_ID], "1")  # Check QUERY_ID matches
-        self.assertEqual(scrape_out[0][DOC_ID], "123")  # Check DOC_ID matches
-
-    @patch("eval.get_active_session")
-    @patch("eval.st.session_state", new_callable=MagicMock)
-    def test_store_scrape_results(self, mock_session_state, mock_get_active_session):
-        # Mock session state properties
-        mock_session_state.scrape_fqn = "mock_db.mock_schema.mock_scrape_table"
-        mock_session_state.start_time = datetime.now()
-        mock_session_state.scrape_run_id = "mock_run_id"
-
-        # Mock session and DataFrame
-        mock_session = mock_get_active_session.return_value
-        mock_dataframe = MagicMock()
-        mock_session.create_dataframe.return_value = mock_dataframe
-        mock_write = MagicMock()
-        mock_dataframe.write.mode.return_value = mock_write
-        mock_write.save_as_table.return_value = None
-
-        # Sample scrape output
-        scrape_out = [{RUN_ID: "mock_run_id", QUERY_ID: "1", DOC_ID: "123", "RANK": 1}]
-
-        # Call function
-        store_scrape_results(scrape_out, mock_session)
-
-        # Assertions
-        mock_session.create_dataframe.assert_called_once_with(scrape_out)
-        mock_dataframe.write.mode.assert_called_once_with("append")
-        mock_dataframe.write.mode().save_as_table.assert_called_once_with(
-            "mock_db.mock_schema.mock_scrape_table"
+        # Call the function under test
+        result_df = perform_scrape_for_eval(
+            mock_session, mock_query_df, MagicMock(), run_id="mock_run_id"
         )
+
+        mock_session.create_dataframe.assert_called_once_with(
+            expected_output
+        )  # Check DataFrame creation
+
+        # Ensure returned DataFrame matches the mocked DataFrame
+        self.assertEqual(result_df, mock_scrape_df)
+
+    @patch("streamlit.session_state", new_callable=MagicMock)
+    def test_store_scrape_results(self, mock_session_state):
+        # Mock session state properties
+        mock_session_state.scrape_fqn = "mock_db.mock_schema.mock_table"
+        mock_session_state.start_time = datetime(2024, 1, 1, 12, 0, 0)
+
+        # Mock the scrape DataFrame
+        mock_scrape_df = MagicMock(name="scrape_df")
+
+        # Mock datetime to control timing
+        mock_now = datetime(2024, 1, 1, 12, 0, 10)
+        with patch("eval.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_now
+
+            # Call the function under test
+            store_scrape_results(mock_scrape_df)
+
+            # Assertions for the DataFrame write operation
+            mock_scrape_df.write.mode.assert_called_once_with("append")
+            mock_scrape_df.write.mode().save_as_table.assert_called_once_with(
+                "mock_db.mock_schema.mock_table"
+            )
+
+            # Assertions for session state and success message
+            duration = mock_now - mock_session_state.start_time
+            assert duration.total_seconds() == 10.0
 
 
 class TestPrepareRelevancyTable(TestCase):
     @patch("streamlit.session_state", new_callable=MagicMock)
     @patch("eval.Session")
-    def test_query_id_present(self, mock_session, mock_session_state):
+    def test_prepare_relevancy_df(self, mock_session, mock_session_state):
         # Mock session state properties
-        mock_session_state.md5_hash = MagicMock()
+        mock_session_state.md5_hash = MagicMock(side_effect=lambda x: f"hash_{x}")
         mock_session_state.css_text_col = TEXT
 
-        # Mock table with QUERY_ID column
-        mock_table = MagicMock()
-        mock_table.columns = [QUERY_ID, DOC_ID]
-        mock_session.table.return_value = mock_table
+        # Mock relevancy table with QUERY_ID and DOC_ID present
+        mock_table_with_ids = MagicMock()
+        mock_table_with_ids.columns = [QUERY_ID, DOC_ID]
+        mock_table_with_ids.withColumn.return_value = (
+            mock_table_with_ids  # Mock chainable behavior
+        )
 
-        result_table = prepare_relevancy_table("relevancy_fqn", mock_session)
+        mock_session.table.return_value = mock_table_with_ids
 
-        # Assert no changes were made
-        self.assertEqual(result_table, mock_table)
+        # Call the function under test
+        result_table = prepare_relevancy_df("relevancy_fqn", mock_session)
+
+        # Assert QUERY_ID and DOC_ID were cast to string
+        mock_table_with_ids.withColumn.assert_any_call(
+            QUERY_ID, mock_table_with_ids[QUERY_ID].cast("string")
+        )
+        mock_table_with_ids.withColumn.assert_any_call(
+            DOC_ID, mock_table_with_ids[DOC_ID].cast("string")
+        )
+
+        # Assert no new columns were added
+        self.assertEqual(result_table, mock_table_with_ids)
         mock_session_state.md5_hash.assert_not_called()
 
     @patch("streamlit.session_state", new_callable=MagicMock)
     @patch("eval.Session")
-    def test_query_id_missing(self, mock_session, mock_session_state):
+    def test_prepare_relevancy_df_missing_columns(
+        self, mock_session, mock_session_state
+    ):
         # Mock session state properties
-        mock_session_state.md5_hash = MagicMock(
-            side_effect=lambda x: f"hashed_{x.lower()}"
+        mock_session_state.md5_hash = MagicMock(side_effect=lambda x: f"hash_{x}")
+        mock_session_state.css_text_col = TEXT
+
+        # Mock relevancy table missing QUERY_ID and DOC_ID
+        mock_table_missing_ids = MagicMock()
+        mock_table_missing_ids.columns = [QUERY]
+        mock_table_missing_ids.withColumn.return_value = (
+            mock_table_missing_ids  # Mock chainable behavior
         )
-        mock_session_state.css_text_col = TEXT
 
-        # Mock table without QUERY_ID column
-        mock_table = MagicMock()
-        mock_table.columns = [QUERY, DOC_ID]
-        mock_table.withColumn.return_value = mock_table
+        mock_session.table.return_value = mock_table_missing_ids
 
-        # Mock column access
-        mock_table.__getitem__.side_effect = lambda col: f"mocked_{col.lower()}"
-        mock_session.table.return_value = mock_table
+        # Call the function under test
+        result_table = prepare_relevancy_df("relevancy_fqn", mock_session)
 
-        # Call the function
-        result_table = prepare_relevancy_table("relevancy_fqn", mock_session)
-
-        # Debugging: print all calls for verification
-        print("withColumn call args:", mock_table.withColumn.call_args_list)
-
-        # Assert QUERY_ID column was added correctly
-        mock_table.withColumn.assert_called_once_with(QUERY_ID, "hashed_mocked_query")
-        self.assertEqual(result_table, mock_table)
-
-    @patch("streamlit.session_state", new_callable=MagicMock)
-    @patch("eval.Session")
-    def test_doc_id_present(self, mock_session, mock_session_state):
-        # Mock session state properties
-        mock_session_state.md5_hash = MagicMock()
-        mock_session_state.css_text_col = TEXT
-
-        # Mock table with DOC_ID column
-        mock_table = MagicMock()
-        mock_table.columns = [QUERY_ID, DOC_ID]
-        mock_session.table.return_value = mock_table
-
-        result_table = prepare_relevancy_table("relevancy_fqn", mock_session)
-
-        # Assert no changes were made
-        self.assertEqual(result_table, mock_table)
-        mock_session_state.md5_hash.assert_not_called()
-
-    @patch("streamlit.session_state", new_callable=MagicMock)
-    @patch("eval.Session")
-    def test_doc_id_missing(self, mock_session, mock_session_state):
-        # Mock session state properties
-        mock_session_state.md5_hash = MagicMock(
-            side_effect=lambda x: f"hashed_{x.lower()}"
+        # Assert QUERY_ID was added using md5_hash on QUERY
+        mock_table_missing_ids.withColumn.assert_any_call(
+            QUERY_ID, mock_session_state.md5_hash(mock_table_missing_ids[QUERY])
         )
-        mock_session_state.css_text_col = TEXT
 
-        # Mock table without DOC_ID column
-        mock_table = MagicMock()
-        mock_table.columns = [QUERY_ID, TEXT]
-        mock_table.withColumn.return_value = mock_table
-        mock_table.__getitem__.side_effect = (
-            lambda col: f"mocked_{col.lower()}"
-        )  # Simulate column access
-        mock_session.table.return_value = mock_table
-
-        # Call the function
-        result_table = prepare_relevancy_table("relevancy_fqn", mock_session)
-
-        # Debugging: print all calls for verification
-        print("withColumn call args:", mock_table.withColumn.call_args_list)
-
-        # Assert DOC_ID column was added with the correct md5_hash
-        mock_table.withColumn.assert_called_once_with(DOC_ID, "hashed_mocked_text")
-        self.assertEqual(result_table, mock_table)
-
-    @patch("streamlit.session_state", new_callable=MagicMock)
-    @patch("eval.Session")
-    def test_query_id_and_doc_id_missing(self, mock_session, mock_session_state):
-        # Mock session state properties
-        mock_session_state.md5_hash = MagicMock(
-            side_effect=lambda x: f"hashed_{x.lower()}"
+        # Assert DOC_ID was added using md5_hash on css_text_col
+        mock_table_missing_ids.withColumn.assert_any_call(
+            DOC_ID,
+            mock_session_state.md5_hash(
+                mock_table_missing_ids[mock_session_state.css_text_col]
+            ),
         )
-        mock_session_state.css_text_col = TEXT
 
-        # Mock table without QUERY_ID and DOC_ID columns
-        mock_table = MagicMock()
-        mock_table.columns = [QUERY, TEXT]
-        mock_table.withColumn.side_effect = lambda col_name, col_value: mock_table
-        mock_table.__getitem__.side_effect = (
-            lambda col: f"mocked_{col.lower()}"
-        )  # Mock column access
-        mock_session.table.return_value = mock_table
-
-        # Call the function
-        result_table = prepare_relevancy_table("relevancy_fqn", mock_session)
-
-        # Assert QUERY_ID was added correctly
-        mock_table.withColumn.assert_any_call(QUERY_ID, "hashed_mocked_query")
-
-        # Assert DOC_ID was added correctly
-        mock_table.withColumn.assert_any_call(DOC_ID, "hashed_mocked_text")
-
-        # Assert both columns were added in sequence
-        assert mock_table.withColumn.call_args_list == [
-            call(QUERY_ID, "hashed_mocked_query"),
-            call(DOC_ID, "hashed_mocked_text"),
-        ]
-
-        self.assertEqual(result_table, mock_table)
+        # Assert result_table matches the transformed table
+        self.assertEqual(result_table, mock_table_missing_ids)
 
 
 class TestEvalFlow(TestCase):
-    @patch("eval.get_session")
     @patch("streamlit.session_state", new_callable=MagicMock)
-    def test_initialize_tables(self, mock_session_state, mock_get_session):
-        mock_session_state.queryset_fqn = "mock_queryset_fqn"
-        mock_session_state.scrape_fqn = "mock_scrape_fqn"
-        mock_session_state.scrape_run_id = "mock_run_id"
-
-        mock_session = MagicMock(spec=Session)
-        mock_query_table = MagicMock(spec=Table)
-        mock_scrape_table = MagicMock(spec=Table)
-        mock_scrape_df = MagicMock(spec=DataFrame)
-
-        mock_get_session.return_value = mock_session
-        mock_session.table.side_effect = [mock_query_table, mock_scrape_table]
-
-        mock_query_table.columns = [QUERY]
-        mock_query_table.withColumn.return_value = mock_query_table
-        mock_scrape_table.filter.return_value = mock_scrape_df
+    @patch("eval.Session")
+    def test_prepare_query_df(self, mock_session, mock_session_state):
+        # Mock session and input table
+        mock_query_table = MagicMock()
         mock_session.table.return_value = mock_query_table
+        mock_query_table.columns = ["query_column"]  # QUERY_ID missing initially
 
-        query_table, scrape_df = initialize_tables(mock_session)
+        # Mock behavior of session_state's md5_hash
+        mock_session_state.queryset_fqn = "mock_queryset_fqn"
+        mock_session_state.md5_hash.return_value = "mock_hash"
 
-        mock_session.table.assert_any_call("mock_queryset_fqn")
-        mock_session.table.assert_any_call("mock_scrape_fqn")
-        mock_query_table.withColumn.assert_called_once_with(
-            QUERY_ID, mock_session_state.md5_hash(mock_query_table[QUERY])
+        # Mock the with_column behavior to add QUERY_ID
+        mock_query_table.with_column.return_value = mock_query_table
+
+        # Call prepare_query_df
+        query_df = prepare_query_df(mock_session)
+
+        # Verify the correct calls
+        mock_session.table.assert_called_once_with("mock_queryset_fqn")
+        mock_query_table.with_column.assert_called_once_with(
+            "QUERY_ID", mock_session_state.md5_hash(mock_query_table["query_column"])
         )
-        mock_scrape_table.filter.assert_called_once()
-        self.assertEqual(query_table, mock_query_table)
-        self.assertEqual(scrape_df, mock_scrape_df)
+        self.assertEqual(query_df, mock_query_table)
+
+    @patch("streamlit.session_state", new_callable=MagicMock)
+    @patch("eval.Session")
+    def test_prepare_query_df_with_query_id(self, mock_session, mock_session_state):
+        # Mock session and input table
+        mock_query_table = MagicMock()
+        mock_session.table.return_value = mock_query_table
+        mock_query_table.columns = [
+            "query_column",
+            "QUERY_ID",
+        ]  # QUERY_ID already exists
+
+        # Mock behavior of session_state's md5_hash
+        mock_session_state.queryset_fqn = "mock_queryset_fqn"
+
+        # Call prepare_query_df
+        query_df = prepare_query_df(mock_session)
+
+        # Verify the correct calls
+        mock_session.table.assert_called_once_with("mock_queryset_fqn")
+        mock_query_table.with_column.assert_not_called()  # QUERY_ID already exists
+        self.assertEqual(query_df, mock_query_table)
 
     @patch("streamlit.session_state", new_callable=MagicMock)
     def test_validate_scrape(self, mock_session_state):
@@ -455,39 +403,6 @@ class TestEvalFlow(TestCase):
 
         result = get_result_limit(mock_scrape_df)
         self.assertEqual(result, 5)
-
-    @patch("streamlit.session_state", new_callable=MagicMock)
-    @patch("eval.get_session")
-    def test_prepare_relevancy_table_basic(self, mock_get_session, mock_session_state):
-        mock_session_state.relevancy_fqn = "mock_relevancy_fqn"
-        mock_session = MagicMock(spec=Session)
-        mock_relevancy_table = MagicMock(spec=Table)
-        mock_modified_relevancy_table = MagicMock(spec=Table)  # Mock for modified table
-
-        # Mocking session table return and columns behavior
-        mock_get_session.return_value = mock_session
-        mock_session.table.return_value = mock_relevancy_table
-        mock_relevancy_table.columns = [
-            QUERY,
-            QUERY_ID,
-            DOC_ID,
-            RELEVANCY,
-        ]  # Both columns are present
-        mock_relevancy_table.return_value = (
-            mock_modified_relevancy_table  # Return the modified table
-        )
-
-        mock_session_state.css_text_col = TEXT
-
-        # Call the function
-        relevancy_table = prepare_relevancy_table(
-            mock_session_state.relevancy_fqn, mock_session
-        )
-
-        # Verify that the table was accessed with the correct fqn
-        mock_session.table.assert_called_once_with("mock_relevancy_fqn")
-
-        self.assertEqual(relevancy_table, mock_relevancy_table)
 
     @patch("streamlit.session_state", new_callable=MagicMock)
     def test_extract_and_dedupe_goldens(self, mock_session_state):
@@ -528,7 +443,6 @@ class TestEvalFlow(TestCase):
             "q1": [("d1", 2), ("d2", 1)],  # d1 has the updated score of 2
             "q2": [("d1", 3)],  # d1 has the highest score of 3
         }
-        print("yey", raw_goldens, expected_raw_goldens)
 
         self.assertEqual(raw_goldens, expected_raw_goldens)
 
@@ -542,7 +456,9 @@ class TestEvalFlow(TestCase):
             mock_session_state.colors["q2"]["d1"], relevance_color_mapping[3]
         )
 
-    def test_prepare_golden_scores(self):
+    @patch("streamlit.session_state", new_callable=MagicMock)
+    def test_prepare_golden_scores(self, mock_session_state):
+        mock_session_state.relevancy_provided = True
         raw_goldens = {
             "q1": [("d1", 3), ("d2", 2)],
             "q2": [("d3", 1)],
@@ -558,7 +474,8 @@ class TestEvalFlow(TestCase):
     @patch("eval.calculate_metrics")
     @patch("streamlit.progress")
     @patch("streamlit.empty")
-    def test_evaluate_queries(self, mock_empty, mock_progress, mock_calculate_metrics):
+    @patch("streamlit.session_state", new_callable=MagicMock)
+    def test_evaluate_queries(self, mock_session_state, mock_empty, mock_progress, mock_calculate_metrics):
         mock_query_table = MagicMock(spec=Table)
         mock_query_table.collect.return_value = [{QUERY_ID: "q1"}, {QUERY_ID: "q2"}]
         mock_scrape_df = MagicMock(spec=DataFrame)
@@ -572,10 +489,10 @@ class TestEvalFlow(TestCase):
         }
         mock_calculate_metrics.return_value = {
             HIT_RATE: 0.8,
-            NDCG: 0.7,
+            SDCG: 0.7,
             PRECISION: 0.6,
-            RECALL: 0.5,
         }
+        mock_session_state.idcg_factor = 3.0
 
         result = evaluate_queries(mock_query_table, mock_scrape_df, goldens)
 
@@ -583,7 +500,6 @@ class TestEvalFlow(TestCase):
         self.assertEqual(result[0][QUERY_ID], "q1")
         self.assertEqual(result[0][HIT_RATE], 0.8)
         self.assertEqual(result[1][QUERY_ID], "q2")
-        self.assertEqual(result[1][RECALL], 0.5)
 
 
 if __name__ == "__main__":
