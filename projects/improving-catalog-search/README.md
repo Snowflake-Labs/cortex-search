@@ -48,7 +48,8 @@ Illustrates the query label extraction  process using LLM-based relevance judgme
 
 The notebooks work with several e-commerce datasets:
 - [WANDS (Wayfair Product Search Dataset)](https://github.com/wayfair/WANDS)
-- [TREC Product Search 2023 and 2024](https://arxiv.org/abs/2311.07861, https://trec-product-search.github.io/index.html)
+- [TREC Product Search 2023](https://arxiv.org/abs/2311.07861)
+- [TREC Product Search 2024](https://trec-product-search.github.io/index.html)
 - [Amazon ESCI](https://github.com/amazon-research/esci-data)
 
 Note: Some datasets may require separate download and setup. Please refer to the individual dataset documentation for access instructions.
