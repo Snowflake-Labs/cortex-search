@@ -37,7 +37,7 @@ DEBUG_SIGNALS = "DEBUG_SIGNALS"
 RESPONSE_RESULTS = "RESPONSE_RESULTS"
 QUERY_ID = "QUERY_ID"
 QUERY = "QUERY"
-CSS = "CORTEX SEARCH SERVICE"
+CSS = "Cortex Search Service"
 DEBUG_PER_RESULT = "@DEBUG_PER_RESULT"
 HIT_RATE = "HIT_RATE"
 SDCG = "SDCG"
@@ -78,10 +78,13 @@ METRICS_TABLE_COLUMNS = (
 lightgreen = "lightgreen"
 lightyellow = "lightyellow"
 lightcoral = "lightcoral"
-AUTOTUNE_SCRAPE_LIMIT = 16
+AUTOTUNE_SCRAPE_LIMIT = 10
+AUTOTUNE_SCRAPE_RELEVANCY_SCRAPE_LIMIT = 40
+AUTOTUNE_SCRAPE_RELEVANCY_RERANK_DEPTH = 64
 DEBUG = "debug"
 SLOWMODE = "slowmode"
 RERANK_WEIGHTS = "RerankWeights"
+RerankDepth = "RerankingDepth"
 RerankingMultiplier = "RerankingMultiplier"
 EmbeddingMultiplier = "EmbeddingMultiplier"
 TopicalityMultiplier = "TopicalityMultiplier"
@@ -93,6 +96,7 @@ INITIAL_GP_POINT = [
     [1.4, 1.0]
 ]  # reranking_multiplier, reranking_multiplier, topicality_multiplier
 NUM_OF_INITIAL_EXPLORATION = 3
+DEFAULT_EMBEDDING_MULTIPLIER = 1.0
 
 
 # --- Utility Functions ---
@@ -580,6 +584,18 @@ def perform_scrape(
     status_text = st.empty()
     status_text.text("Scraping in progress.. (this may take a while)")
 
+    result_limit = AUTOTUNE_SCRAPE_LIMIT if autotune else st.session_state.result_limit
+    if st.session_state.scrape_for_autotune_relevancy:
+        result_limit = AUTOTUNE_SCRAPE_RELEVANCY_SCRAPE_LIMIT
+        experimental_params = {
+            DEBUG: True,
+            SLOWMODE: True,
+            RERANK_WEIGHTS: {RerankDepth: AUTOTUNE_SCRAPE_RELEVANCY_RERANK_DEPTH},
+        }
+        st.write("Run scape for autotune's LLM generated relevancy with")
+        st.write("1. result limit: " + str(result_limit))
+        st.write("2. experimental params: " + str(experimental_params))
+
     for i, row in enumerate(all_queries):
         progress_percentage = int((i + 1) / total_rows * 100)
         progress_bar.progress(progress_percentage)
@@ -589,10 +605,9 @@ def perform_scrape(
         columns = [st.session_state.css_text_col]
         response = svc.search(
             query,
-            limit=AUTOTUNE_SCRAPE_LIMIT if autotune else st.session_state.result_limit,
+            limit=result_limit,
             columns=columns + st.session_state.additional_columns,
             filter=st.session_state.filter,
-            # Todo(amehta): input experimental args and use them here
             # debug set to True to display debug signals
             experimental=experimental_params if experimental_params else {DEBUG: True},
         )
@@ -605,12 +620,9 @@ def perform_scrape(
     return scrape_out
 
 
-def generate_docid_response_result(response_result: Dict[str, Any]) -> str:
+def generate_docid(doc_text: str) -> str:
     "Return the doc-id for the doc in service's response result."
-    doc_id = hashlib.md5(
-        str(response_result[st.session_state.css_text_col]).encode("utf-8")
-    ).hexdigest()
-    return doc_id
+    return hashlib.md5(doc_text.encode("utf-8")).hexdigest()
 
 
 def perform_scrape_for_autotune(
@@ -630,7 +642,7 @@ def perform_scrape_for_autotune(
     )
     return {
         query_id: [
-            generate_docid_response_result(result)
+            generate_docid(str(result[st.session_state.css_text_col]))
             for result in response[RESPONSE_RESULTS]
         ]
         for query_id, response in raw_scrape_out.items()
@@ -663,7 +675,7 @@ def perform_scrape_for_eval(
                     QUERY: response[QUERY],
                     RUN_ID: response[RUN_ID],
                     QUERY_ID: query_id,
-                    DOC_ID: generate_docid_response_result(result),
+                    DOC_ID: generate_docid(str(result[st.session_state.css_text_col])),
                     RANK: rank + 1,
                     DEBUG_SIGNALS: result[DEBUG_PER_RESULT],
                     st.session_state.css_text_col.upper(): result[
@@ -688,7 +700,9 @@ def generate_and_store_scrape(session: Session, root: Root) -> None:
     st.session_state.start_time = datetime.now()
 
     query_df = prepare_query_df(session)
+    st.session_state.scrape_for_autotune_relevancy = st.session_state.run_autotuning
     scrape_df = perform_scrape_for_eval(session, query_df, root)
+    st.session_state.scrape_for_autotune_relevancy = False
 
     store_scrape_results(scrape_df)
 
@@ -768,6 +782,7 @@ def run_eval(relevancy_fqn: str, result_fqn: str, run_comment: str) -> None:
 
 
 def compute_fusion_score_from_service(
+    root: Any,
     query_df: DataFrame,
     goldens: Dict[str, Dict[str, Dict[str, int]]],
     params: Dict[str, Any],
@@ -832,7 +847,7 @@ def run_autotuning(
         goldens = prepare_golden_scores(raw_goldens)
         progress_bar.progress(60)  # 60% done
         compute_fusion_score_from_service_partial = functools.partial(
-            compute_fusion_score_from_service, query_df, goldens
+            compute_fusion_score_from_service, root, query_df, goldens
         )
 
         @skopt.utils.use_named_args(GP_SEARCH_SPACE)
@@ -842,7 +857,7 @@ def run_autotuning(
         ):
             params = {
                 RerankingMultiplier: reranking_multiplier,
-                EmbeddingMultiplier: 1.0,
+                EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
                 TopicalityMultiplier: topicality_multiplier,
             }
             # Need this formula because using gp_minimize (not maximization).
@@ -860,7 +875,7 @@ def run_autotuning(
         autotune_params = {
             RERANK_WEIGHTS: {
                 RerankingMultiplier: result.x[0],
-                EmbeddingMultiplier: 1.0,
+                EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
                 TopicalityMultiplier: result.x[1],
             },
             DEBUG: True,
@@ -1332,6 +1347,7 @@ def initialize_session_state() -> None:
     session_defaults = {
         "scrape_ready": False,
         "scrape_fqn": "",
+        "scrape_for_autotune_relevancy": False,
         "scrape_run_id": "",
         "result_limit": -1,
         "aggregate_metrics_display_df": "",
@@ -1507,9 +1523,12 @@ def process_eval_input(db, schema, autotune=False):
     result_fqn = f"{db}.{schema}.css_metrics"
     # run_comment = st.text_input("Add optional note", placeholder="stored as text")
     run_comment = "simple"
-    st.session_state.scrape_run_id = generate_runid()
-    process_generate_scrape(db, schema)
-    if st.session_state.scrape_ready:
+    if st.session_state.run_evaluation or not st.session_state.relevancy_provided:
+        st.session_state.scrape_run_id = generate_runid()
+        process_generate_scrape(db, schema)
+    if st.session_state.scrape_ready or (
+        st.session_state.run_autotuning or st.session_state.relevancy_provided
+    ):
         st.success(
             f"""
             Scrape Stored in:

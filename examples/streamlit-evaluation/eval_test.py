@@ -10,6 +10,7 @@ from eval import (
     generate_and_store_scrape,
     prepare_query_df,
     perform_scrape_for_eval,
+    perform_scrape_for_autotune,
     store_scrape_results,
     validate_scrape,
     get_result_limit,
@@ -17,6 +18,7 @@ from eval import (
     extract_and_dedupe_goldens,
     prepare_golden_scores,
     evaluate_queries,
+    compute_fusion_score_from_service,
     QUERY_ID,
     QUERY,
     HIT_RATE,
@@ -28,6 +30,13 @@ from eval import (
     DEBUG_PER_RESULT,
     RESPONSE_RESULTS,
     DEBUG_SIGNALS,
+    DEBUG,
+    SLOWMODE,
+    EmbeddingMultiplier,
+    RerankingMultiplier,
+    TopicalityMultiplier,
+    RERANK_WEIGHTS,
+    DEFAULT_EMBEDDING_MULTIPLIER,
 )
 from datetime import datetime
 from snowflake.snowpark import Session
@@ -63,9 +72,8 @@ class TestMetrics(TestCase):
 
     def test_sdcg(self):
         # Calculate DCG and SDCG values for given results and golden data
-        expected_sdcg = _dcg(self.results, self.golden_to_score) / (3.0 * sum(
-            1.0/ math.log2(i + 2.0) for i in range(4)
-            )
+        expected_sdcg = _dcg(self.results, self.golden_to_score) / (
+            3.0 * sum(1.0 / math.log2(i + 2.0) for i in range(4))
         )
         self.assertAlmostEqual(
             sdcg(3.0, self.results, self.golden_to_score), expected_sdcg, places=5
@@ -475,7 +483,9 @@ class TestEvalFlow(TestCase):
     @patch("streamlit.progress")
     @patch("streamlit.empty")
     @patch("streamlit.session_state", new_callable=MagicMock)
-    def test_evaluate_queries(self, mock_session_state, mock_empty, mock_progress, mock_calculate_metrics):
+    def test_evaluate_queries(
+        self, mock_session_state, mock_empty, mock_progress, mock_calculate_metrics
+    ):
         mock_query_table = MagicMock(spec=Table)
         mock_query_table.collect.return_value = [{QUERY_ID: "q1"}, {QUERY_ID: "q2"}]
         mock_scrape_df = MagicMock(spec=DataFrame)
@@ -500,6 +510,126 @@ class TestEvalFlow(TestCase):
         self.assertEqual(result[0][QUERY_ID], "q1")
         self.assertEqual(result[0][HIT_RATE], 0.8)
         self.assertEqual(result[1][QUERY_ID], "q2")
+
+
+class TestAutotuneFlow(TestCase):
+    @patch("streamlit.session_state", new_callable=MagicMock)  # Mock st.session_state
+    @patch("eval.generate_docid")
+    @patch("eval.perform_scrape")
+    @patch("eval.Root")
+    def test_perform_scrape_for_autotune(
+        self,
+        mock_root,
+        mock_perform_scrape,
+        mock_generate_docid,
+        mock_session_state,
+    ):
+        # Mock parameters and results
+        mock_experimental_params = {
+            DEBUG: True,
+            SLOWMODE: True,
+            RERANK_WEIGHTS: {
+                RerankingMultiplier: 1.4,
+                EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
+                TopicalityMultiplier: 1.0,
+            },
+        }
+
+        # Mock return values
+        mock_query_df = MagicMock(spec=DataFrame, name="query_df")
+        mock_scrape_out = {
+            "123": {
+                QUERY: "abc",
+                RUN_ID: "xyz",
+                RESPONSE_RESULTS: [{"TEXT": "text"}],
+            }
+        }
+        mock_perform_scrape.return_value = mock_scrape_out
+        mock_generate_docid.return_value = "mnp"
+
+        # Mock session and root
+        mock_session_state.css_text_col = "TEXT"
+        mock_root_instance = mock_root.return_value
+
+        # Expected output
+        expected_output = {"123": ["mnp"]}
+
+        # Call function
+        result = perform_scrape_for_autotune(
+            mock_query_df, mock_root_instance, mock_experimental_params
+        )
+
+        # Assertions
+        mock_perform_scrape.assert_called_once_with(
+            mock_query_df,
+            mock_root_instance,
+            autotune=True,
+            experimental_params=mock_experimental_params,
+            run_id="",
+        )
+        mock_generate_docid.assert_called_once()
+        self.assertEqual(result, expected_output)
+
+    @patch("streamlit.session_state", new_callable=MagicMock)  # Mock st.session_state
+    @patch("eval.perform_scrape_for_autotune")
+    @patch("eval.sdcg")
+    @patch("eval.Root")
+    def test_compute_fusion_score_from_service(
+        self,
+        mock_root,
+        mock_sdcg,
+        mock_perform_scrape_for_autotune,
+        mock_session_state,
+    ):
+        # Mock parameters and results
+        mock_params = {
+            RerankingMultiplier: 1.4,
+            EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
+            TopicalityMultiplier: 1.0,
+        }
+        mock_experimental_params = {
+            DEBUG: True,
+            SLOWMODE: True,
+            RERANK_WEIGHTS: mock_params,
+        }
+        mock_doc_list = ["mnp"]
+        mock_golden_set = {
+            "abc": {"score": 3},
+            "mnp": {"score": 8},
+        }
+        mock_query_to_doc_list = {"123": mock_doc_list}
+        mock_goldens = {"123": mock_golden_set}
+
+        # Mock return values
+        mock_query_df = MagicMock(spec=DataFrame, name="query_df")
+        mock_query_df.collect.return_value = [{QUERY_ID: "123"}]
+        mock_perform_scrape_for_autotune.return_value = mock_query_to_doc_list
+        mock_sdcg.return_value = 0.7
+
+        # Mock session and root
+        mock_session_state.idcg_factor = 3.0
+        mock_root_instance = mock_root.return_value
+
+        # Expected output
+        expected_output = 0.7
+
+        # Call function
+        result = compute_fusion_score_from_service(
+            mock_root_instance, mock_query_df, mock_goldens, mock_params
+        )
+
+        # Assertions
+        mock_perform_scrape_for_autotune.assert_called_once_with(
+            mock_query_df,
+            mock_root_instance,
+            experimental_params=mock_experimental_params,
+        )
+        mock_sdcg.assert_called_once_with(
+            idcg_factor=3.0,
+            results=["mnp"],
+            golden_to_score={"abc": {"score": 3}, "mnp": {"score": 8}},
+        )
+        self.assertEqual(result, expected_output)
 
 
 if __name__ == "__main__":
