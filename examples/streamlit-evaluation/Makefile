@@ -1,17 +1,20 @@
 # sets up a local Python development environment
 setup:
-	@command -v uv >/dev/null 2>&1 || { echo >&2 "uv is not installed. Installing via Homebrew..."; brew install uv; }
+	@if ! command -v uv >/dev/null 2>&1; then \
+		echo "Installing uv via curl..."; \
+		curl -LsSf https://astral.sh/uv/install.sh | sh; \
+	fi
 	uv sync
 
 check:
-	ruff check
+	uv run ruff check
 
 format:
-	ruff check --fix
-	ruff format
+	uv run ruff check --fix
+	uv run ruff format
 
 test:
-	pytest eval_test.py
+	uv run pytest eval_test.py
 
 run:
 	uv run streamlit run eval.py --server.headless True

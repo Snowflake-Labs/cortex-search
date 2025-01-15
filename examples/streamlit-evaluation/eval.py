@@ -1,4 +1,5 @@
 # Standard library imports
+import functools
 import hashlib
 import json
 import math
@@ -8,42 +9,52 @@ import os
 
 # Third-party library imports
 import pandas as pd
+import skopt
 import streamlit as st
+from skopt.space import Real
 
 # Snowflake-specific imports
 from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.exceptions import SnowparkSessionException
 from snowflake.snowpark.exceptions import SnowparkSQLException
-from snowflake.snowpark.functions import col, max as spmax, udf, lit
+from snowflake.snowpark.functions import (
+    col,
+    max as spmax,
+    udf,
+    lit,
+)
 from snowflake.snowpark.session import Session
-from snowflake.snowpark.table import Table
-from snowflake.snowpark.dataframe import DataFrame
+from snowflake.snowpark.dataframe import DataFrame, Column
 from snowflake.snowpark.types import StringType
 from snowflake.snowpark.row import Row
 from snowflake.core import Root
-
 
 # --- Constants ---
 RUN_ID = "RUN_ID"
 DOC_ID = "DOC_ID"
 RANK = "RANK"
 DEBUG_SIGNALS = "DEBUG_SIGNALS"
+RESPONSE_RESULTS = "RESPONSE_RESULTS"
 QUERY_ID = "QUERY_ID"
 QUERY = "QUERY"
-CSS = "CORTEX SEARCH SERVICE"
+CSS = "Cortex Search Service"
 DEBUG_PER_RESULT = "@DEBUG_PER_RESULT"
 HIT_RATE = "HIT_RATE"
-NDCG = "NDCG"
-RECALL = "RECALL"
+SDCG = "SDCG"
 PRECISION = "PRECISION"
-VALID_METRICS = (HIT_RATE, NDCG, RECALL, PRECISION)
+VALID_METRICS = (HIT_RATE, SDCG, PRECISION)
 VALID_LIMITS = (1, 3, 5, 10, 20, 50, 100)
+IDCG = {k: sum(1.0 / math.log2(i + 2.0) for i in range(k)) for k in VALID_LIMITS}
 RELEVANCY = "RELEVANCY"
 FINAL_SCORE = "FINAL_SCORE"
 RELEVANCY_SCORE = "RELEVANCY_SCORE"
 TOTAL_QUERIES = "TOTAL_QUERIES"
 COMMENT = "COMMENT"
 RUN_METADATA = "RUN_METADATA"
+JUDGE_OUTPUT = "JUDGE_OUTPUT"
+PROMPT = "PROMPT"
+COMPLETE_FUNC = "SNOWFLAKE.CORTEX.COMPLETE"
+LLM_MODEL = "llama3.1-405b"
 TABLE_INPUT_PLACEHOLDER = "in format db.schema.table"
 QUERIES_TABLE_COLUMNS = (QUERY,)  # ',' allows casting this into a set later
 RELEVANCY_TABLE_COLUMNS = (
@@ -61,16 +72,118 @@ METRICS_TABLE_COLUMNS = (
     RUN_ID,
     RUN_METADATA,
     HIT_RATE,
-    NDCG,
+    SDCG,
     PRECISION,
-    RECALL,
 )
 lightgreen = "lightgreen"
 lightyellow = "lightyellow"
 lightcoral = "lightcoral"
+AUTOTUNE_SCRAPE_LIMIT = 10
+AUTOTUNE_SCRAPE_RELEVANCY_SCRAPE_LIMIT = 40
+AUTOTUNE_SCRAPE_RELEVANCY_RERANK_DEPTH = 64
+DEBUG = "debug"
+SLOWMODE = "slowmode"
+RERANK_WEIGHTS = "RerankWeights"
+RerankDepth = "RerankingDepth"
+RerankingMultiplier = "RerankingMultiplier"
+EmbeddingMultiplier = "EmbeddingMultiplier"
+TopicalityMultiplier = "TopicalityMultiplier"
+GP_SEARCH_SPACE = [
+    Real(0.02, 5.0, base=2.0, prior="log-uniform", name="reranking_multiplier"),
+    Real(0.02, 5.0, base=2.0, prior="log-uniform", name="topicality_multiplier"),
+]
+INITIAL_GP_POINT = [
+    [1.4, 1.0]
+]  # reranking_multiplier, reranking_multiplier, topicality_multiplier
+NUM_OF_INITIAL_EXPLORATION = 3
+DEFAULT_EMBEDDING_MULTIPLIER = 1.0
 
 
 # --- Utility Functions ---
+
+
+def get_llm_judge_prompt():
+    gaurav_prompt = """You are an expert search result rater. You are given a user query and a search result. Your task is to rate the search result based on its relevance to the user query. You should rate the search result on a scale of 0 to 3, where:
+    0: The search result has no relevance to the user query.
+    1: The search result has low relevance to the user query. In this case the search result may contain some information which seems very slightly related to the user query but not enough information to answer the user query. The search result contains some references or very limited information about some entities present in the user query. In case the query is a statement on a topic, the search result should be tangentially related to it.
+    2: The search result has medium relevance to the user query. If the user query is a question, the search result may contain some information that is relevant to the user query but not enough information to answer the user query. If the user query is a search phrase/sentence, either the search result is centered around about most but not all entities present in the user query, or if all the entities are present in the result, the search result while not being centered around it has medium level of relevance. In case the query is a statement on a topic, the search result should be related to the topic.
+    3: The search result has high relevance to the user query. If the user query is a question, the search result contains information that can answer the user query. Otherwise if the search query is a search phrase/sentence, it provides relevant information about all entities that are present in the user query and the search result is centered around the entities mentioned in the query. In case the query is a statement on a topic, the search result should be either be directly addressing it or be on the same topic.
+    
+    You should think step by step about the user query and the search result and rate the search result. You should also provide a reasoning for your rating.
+    
+    Use the following format:
+    Rating: Example Rating
+    Reasoning: Example Reasoning
+    
+    ### Examples
+    Example:
+    Example 1:
+    INPUT:
+    User Query: What is the definition of an accordion?
+    Search Result: Accordion definition, Also called piano accordion. a portable wind instrument having a large bellows for forcing air through small metal reeds, a keyboard for the right hand, and buttons for sounding single bass notes or chords for the left hand. a similar instrument having single-note buttons instead of a keyboard.
+    OUTPUT:
+    Rating: 3
+    Reasoning: In this case the search query is a question. The search result directly answers the user question for the definition of an accordion, hence it has high relevance to the user query.
+    
+    Example 2:
+    INPUT:
+    User Query: dark horse
+    Search Result: Darkhorse is a person who everyone expects to be last in a race. Think of it this way. The person who looks like he can never get laid defies the odds and gets any girl he can by being sly,shy and cunning. Although he\'s not a player, he can really charm the ladies.
+    OUTPUT:
+    Rating: 3
+    Reasoning: In this case the search query is a search phrase mentioning \'dark horse\'. The search result contains information about the term \'dark horse\' and provides a definition for it and is centered around it. Hence it has high relevance to the user query.
+    
+    Example 3:
+    INPUT:
+    User Query: Global warming and polar bears
+    Search Result: Polar bear The polar bear is a carnivorous bear whose native range lies largely within the Arctic Circle, encompassing the Arctic Ocean, its surrounding seas and surrounding land masses. It is a large bear, approximately the same size as the omnivorous Kodiak bear (Ursus arctos middendorffi).
+    OUTPUT:
+    Rating: 2
+    Reasoning: In this case the search query is a search phrase mentioning two entities \'Global warming\' and \'polar bears\'. The search result contains is centered around the polar bear which is one of the two entities in the search query. Therefore it addresses most of the entities present and hence has medium relevance. 
+    
+    Example 4:
+    INPUT:
+    User Query: Snowflake synapse private link
+    Search Result: "This site can\'t be reached" error when connecting to Snowflake via Private Connectivity\nThis KB article addresses an issue that prevents connections to Snowflake failing with: "This site can\'t be reached" ISSUE: Attempting to reach Snowflake via Private Connectivity fails with the "This site can\'t be reached" error
+    OUTPUT:
+    Rating: 1
+    Reasoning: In this case the search result is a search query mentioning \'Snowflake synapse private link\'. However the search result doesn\'t contain information about it. However it shows an error message for a generic private link which is tangentially related to the query, since snowflake synapse private link is a type of private link. Hence it has low relevance to the user query.
+    
+    Example 5:
+    INPUT:
+    User Query: The Punisher is American.
+    Search Result: The Rev(Samuel Smith) is a fictional character, a supervillain appearing in American comic books published by Marvel Comics. Created by Mike Baron and Klaus Janson, the character made his first appearance in The Punisher Vol. 2, #4 (November 1987). He is an enemy of the Punisher.
+    OUTPUT:
+    Rating: 1
+    Reasoning: In this case the search query is a statement concerning the Punisher. However the search result is about a character called Rev, who is an enemy of the Punisher. The search result is tangentially related to the user query but does not address topic about Punisher being an American. Hence it has low relevance to the user query.
+
+    Example 6:
+    INPUT:
+    User Query: query_history
+    Search Result: The function task_history() is not enough for the purposes when the required result set is more than 10k.If we perform UNION between information_schema and account_usage , then we will get more than 10k records along with recent records as from information_schema.query_history to snowflake.account_usage.query_history is 45 mins behind.
+    OUTPUT:
+    Rating: 1
+    Reasoning: In this case the search query mentioning one entity \'query_history\'. The search result is neither centered around it and neither has medium relevance, it only contains an unimportant reference to it. Hence it has low relevance to the user query.
+    
+    Example 7:
+    INPUT:
+    User Query: Who directed pulp fiction?
+    Search Result: Life on Earth first appeared as early as 4.28 billion years ago, soon after ocean formation 4.41 billion years ago, and not long after the formation of the Earth 4.54 billion years ago.
+    OUTPUT:
+    Rating: 0
+    Reasoning: In the case the search query is a question. However the search result does is completely unrelated to it. Hence the search result is completely irrelevant to the movie pulp fiction. 
+    ###
+    
+    Now given the user query and search result below, rate the search result based on its relevance to the user query and provide a reasoning for your rating.
+    INPUT:
+    User Query: {query}
+    Search Result: {passage}
+    OUTPUT:\n
+"""
+
+    return gaurav_prompt
+
+
 def hit_rate(results: List[str], golden_to_score: Dict[str, Dict[str, int]]) -> int:
     """Calculate hit rate for search results."""
     for result in results:
@@ -79,13 +192,15 @@ def hit_rate(results: List[str], golden_to_score: Dict[str, Dict[str, int]]) -> 
     return 0
 
 
-def ndcg(results: List[str], golden_to_score: Dict[str, Dict[str, int]]) -> float:
-    """Calculate NDCG for search results."""
-    k = min(len(results), len(golden_to_score))
-    ideal_golden_results = sorted(golden_to_score.items(), key=lambda x: x[1]["rank"])[
-        :k
-    ]
-    ideal = _dcg([doc[0] for doc in ideal_golden_results], golden_to_score)
+def sdcg(
+    idcg_factor: float, results: List[str], golden_to_score: Dict[str, Dict[str, int]]
+) -> float:
+    """Calculate sDCG, a modified verion of nDCG for LLM Judge evaluation results."""
+    k = len(results)
+
+    if k not in IDCG:
+        IDCG[k] = sum(1.0 / math.log2(i + 2.0) for i in range(k))
+    ideal = idcg_factor * IDCG[k]
 
     if ideal == 0:
         return 0.0
@@ -119,14 +234,6 @@ def precision(results: List[str], golden_to_score: Dict[str, Dict[str, int]]) ->
         if results
         else 0.0
     )
-
-
-def recall(results: List[str], golden_to_score: Dict[str, Dict[str, int]]) -> float:
-    """Calculate recall for search results."""
-    if not golden_to_score:
-        return float("nan")
-
-    return count_relevant_results(results, golden_to_score) / len(golden_to_score)
 
 
 def compute_display_metrics(
@@ -169,7 +276,7 @@ def calculate_metrics(
     Args:
         scraped_results (list): List of document IDs returned by the search.
         golden_to_score (dict): Mapping of document IDs to their relevance scores.
-        metrics (dict): Metric functions (precision, recall, etc.) to apply.
+        metrics (dict): Metric functions (precision, hitrate, etc.) to apply.
         cutoff_values (list): Cutoff values (e.g., top-k limits) to compute metrics at.
 
     Returns:
@@ -245,8 +352,8 @@ def color_code_columns(row: pd.Series, columns: List[str]) -> List[str]:
     """
     styles = [""] * len(row)
 
-    if row[QUERY_ID] in st.session_state.colors:
-        doc_colors = st.session_state.colors[row[QUERY_ID]]
+    if str(row[QUERY_ID]) in st.session_state.colors:
+        doc_colors = st.session_state.colors[str(row[QUERY_ID])]
         doc_id = str(row[DOC_ID])
         if doc_id in doc_colors:
             color = doc_colors[doc_id]
@@ -295,29 +402,8 @@ def get_search_column() -> str:
         return result[0][5]
     except Exception as e:
         st.write(f"An error occurred: {e}")
+        st.stop()
         return ""
-
-
-def validate_css_id_col() -> bool:
-    """
-    Verify that the specified table contains all required columns.
-
-    Parameters:
-    - fqn: str - Fully qualified name of the table (e.g., "database.schema.table")
-    - required_cols: Set[str] - A set of column names that must be present in the table
-
-    Returns:
-    - bool: True if all required columns are present in the table, False otherwise
-    """
-    try:
-        result = session.sql(
-            f"DESCRIBE CORTEX SEARCH SERVICE {st.session_state.css_fqn}"
-        ).collect()
-        css_columns = set(col.upper() for col in result[0][7].split(","))
-        return st.session_state.css_id_col.upper() in css_columns
-    except Exception as e:
-        st.write(f"An error occurred: {e}")
-        return False
 
 
 def check_table_exists(fqn: str) -> bool:
@@ -386,6 +472,15 @@ def validate_fqn(fqn: str, fqn_name: str) -> None:
     # Validate each part of the FQN
     for part in parts:
         assert part, f"Each part of the {fqn_name} fully qualified name must be non-empty (e.g., `DB`, `SCHEMA`, `OBJECT`)."
+
+
+def validate_doc_id_col(fqn):
+    assert check_table_exists(fqn), f"The table `{fqn}` does not exist!"
+    actual_cols = get_column_names(fqn, session)
+    if DOC_ID in actual_cols:
+        st.warning(
+            "Warning: user-defined `DOC_ID` should not exist in relevancy table. Remove the `DOC_ID` column if it is NOT from the relevancy table generated by this tool"
+        )
 
 
 def validate_table(
@@ -457,63 +552,130 @@ def generate_runid() -> str:
     return hashlib.md5(str(datetime.now()).encode("utf-8")).hexdigest()
 
 
-def prepare_query_table(session: Session) -> Table:
+def prepare_query_df(session: Session) -> DataFrame:
     """Prepare the query table and ensure QUERY_ID column exists."""
-    query_table = session.table(st.session_state.queryset_fqn)
+    query_df = session.table(st.session_state.queryset_fqn)
 
-    if QUERY_ID not in query_table.columns:
-        query_table = query_table.withColumn(
-            QUERY_ID, st.session_state.md5_hash(query_table[QUERY])
+    # Convert to DataFrame
+    if QUERY_ID not in query_df.columns:
+        query_df = query_df.with_column(
+            QUERY_ID, st.session_state.md5_hash(query_df[QUERY])
         )  # Generate QUERY_ID if missing
 
-    return query_table
+    return query_df
 
 
-def perform_scrape(query_table: Table, root: Root) -> List[Dict[str, Any]]:
+def perform_scrape(
+    query_df: DataFrame,
+    root: Root,
+    autotune: bool = False,
+    experimental_params: dict = {},
+    run_id: str = "",
+) -> Dict[str, Any]:
     """Perform scraping for each query and return the results."""
     css_db, css_schema, css_service = st.session_state.css_fqn.split(".")
     svc = root.databases[css_db].schemas[css_schema].cortex_search_services[css_service]
-    scrape_out = []
-    all_queries = query_table.collect()
+    scrape_out = dict()
+    all_queries = query_df.collect()
     validate_queryset(all_queries)
+
     total_rows = len(all_queries)
     progress_bar = st.progress(0)
     status_text = st.empty()
     status_text.text("Scraping in progress.. (this may take a while)")
 
+    result_limit = AUTOTUNE_SCRAPE_LIMIT if autotune else st.session_state.result_limit
+    if st.session_state.scrape_for_autotune_relevancy:
+        result_limit = AUTOTUNE_SCRAPE_RELEVANCY_SCRAPE_LIMIT
+        experimental_params = {
+            DEBUG: True,
+            SLOWMODE: True,
+            RERANK_WEIGHTS: {RerankDepth: AUTOTUNE_SCRAPE_RELEVANCY_RERANK_DEPTH},
+        }
+        st.write("Run scape for autotune's LLM generated relevancy with")
+        st.write("1. result limit: " + str(result_limit))
+        st.write("2. experimental params: " + str(experimental_params))
+
     for i, row in enumerate(all_queries):
         progress_percentage = int((i + 1) / total_rows * 100)
         progress_bar.progress(progress_percentage)
-        query, query_id = row[QUERY], row[QUERY_ID]
+        query, query_id = row[QUERY], str(row[QUERY_ID])
 
         # Perform the search request
         columns = [st.session_state.css_text_col]
-        if st.session_state.css_id_given:
-            columns.append(st.session_state.css_id_col)
-
         response = svc.search(
             query,
-            limit=st.session_state.result_limit,
+            limit=result_limit,
             columns=columns + st.session_state.additional_columns,
             filter=st.session_state.filter,
-            # Todo(amehta): input experimental args and use them here
             # debug set to True to display debug signals
-            experimental={"debug": True},
+            experimental=experimental_params if experimental_params else {DEBUG: True},
         )
-        # Append each result to the scrape output
-        for rank, result in enumerate(response.results):
-            if st.session_state.css_id_given:
-                doc_id = str(result[st.session_state.css_id_col])
-            else:
-                doc_id = hashlib.md5(
-                    str(result[st.session_state.css_text_col]).encode("utf-8")
-                ).hexdigest()
+        scrape_out[query_id] = {
+            QUERY: query,
+            RUN_ID: (run_id or st.session_state.scrape_run_id),
+            RESPONSE_RESULTS: response.results,
+        }
+    status_text.text("Scrape Finished!")
+    return scrape_out
 
+
+def generate_docid(doc_text: str) -> str:
+    "Return the doc-id for the doc in service's response result."
+    return hashlib.md5(doc_text.encode("utf-8")).hexdigest()
+
+
+def perform_scrape_for_autotune(
+    query_df: DataFrame,
+    root: Root,
+    experimental_params: dict = {},
+    run_id: str = "",
+) -> Dict[str, Any]:
+    """Perform scraping for each query in autotune process."""
+
+    raw_scrape_out = perform_scrape(
+        query_df,
+        root,
+        autotune=True,
+        experimental_params=experimental_params,
+        run_id=run_id,
+    )
+    return {
+        query_id: [
+            generate_docid(str(result[st.session_state.css_text_col]))
+            for result in response[RESPONSE_RESULTS]
+        ]
+        for query_id, response in raw_scrape_out.items()
+    }
+
+
+def perform_scrape_for_eval(
+    session: Session,
+    query_df: DataFrame,
+    root: Root,
+    experimental_params: dict = {},
+    run_id: str = "",
+) -> DataFrame:
+    """Perform scraping for each query in evaluation process."""
+
+    raw_scrape_out = perform_scrape(
+        query_df,
+        root,
+        autotune=False,
+        experimental_params=experimental_params,
+        run_id=run_id,
+    )
+
+    scrape_out = []
+    for query_id, response in raw_scrape_out.items():
+        # Append each result to the scrape output
+        for rank, result in enumerate(response[RESPONSE_RESULTS]):
             scrape_out.append(
                 {
-                    RUN_ID: st.session_state.scrape_run_id,
+                    QUERY: response[QUERY],
+                    RUN_ID: response[RUN_ID],
                     QUERY_ID: query_id,
-                    DOC_ID: doc_id,
+                    DOC_ID: generate_docid(str(result[st.session_state.css_text_col])),
                     RANK: rank + 1,
                     DEBUG_SIGNALS: result[DEBUG_PER_RESULT],
                     st.session_state.css_text_col.upper(): result[
@@ -521,27 +683,28 @@ def perform_scrape(query_table: Table, root: Root) -> List[Dict[str, Any]]:
                     ],  # Todo(amehta): Handle markdown if necessary
                 }
             )
-
-    return scrape_out
-
-
-def store_scrape_results(scrape_out: List[Dict[str, Any]], session: Session) -> None:
-    """Store scrape results in the Snowflake table and display progress."""
     scrape_df = session.create_dataframe(scrape_out)
-    scrape_df.write.mode("append").save_as_table(st.session_state.scrape_fqn)
+    return scrape_df
 
-    duration = datetime.now() - st.session_state.start_time
-    st.success(f"Finished scrape in {round(duration.total_seconds(),1)} seconds")
+
+def store_scrape_results(scrape_df: DataFrame) -> None:
+    """Store scrape results in the Snowflake table and display progress."""
+    scrape_df.write.mode("append").save_as_table(st.session_state.scrape_fqn)
+    # st.success(f"""
+    #            Finished scrape in {round(duration.total_seconds(),1)} seconds. Generated Scrape stored in {st.session_state.scrape_fqn} with Run ID: {st.session_state.scrape_run_id}
+    #            """)
 
 
 def generate_and_store_scrape(session: Session, root: Root) -> None:
     """Generate and store scrape results."""
     st.session_state.start_time = datetime.now()
 
-    query_table = prepare_query_table(session)
-    scrape_out = perform_scrape(query_table, root)
+    query_df = prepare_query_df(session)
+    st.session_state.scrape_for_autotune_relevancy = st.session_state.run_autotuning
+    scrape_df = perform_scrape_for_eval(session, query_df, root)
+    st.session_state.scrape_for_autotune_relevancy = False
 
-    store_scrape_results(scrape_out, session)
+    store_scrape_results(scrape_df)
 
 
 def refresh_state_to_pre_eval():
@@ -553,54 +716,227 @@ def run_eval(relevancy_fqn: str, result_fqn: str, run_comment: str) -> None:
     """Run evaluation on scraped results against golden standards."""
     start_time = datetime.now()
 
-    # There might be an older eval which was run, hence some values might be saved in session_state
-    # clear them up
-    refresh_state_to_pre_eval()
+    # Reset progress and status
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    try:
+        # Clear session state for a fresh run
+        refresh_state_to_pre_eval()
+        status_text.text("Initializing tables...")
+        query_df = prepare_query_df(session)
+        scrape_df = prepare_scrape_df(session)
 
-    query_table, scrape_df = initialize_tables(session)
-    validate_scrape(scrape_df)
+        # scrape_df.collect()
+        progress_bar.progress(10)  # 10% done
 
-    st.session_state.result_limit = get_result_limit(scrape_df)
+        # Validate scrape
+        status_text.text("Validating scraped data...")
+        validate_scrape(scrape_df)
+        progress_bar.progress(20)  # 20% done
 
-    relevancy_table = prepare_relevancy_table(relevancy_fqn, session)
+        # Generate relevancy table
+        status_text.text("Preparing relevancy table...")
+        if st.session_state.relevancy_provided:
+            relevancy_df = prepare_relevancy_df(relevancy_fqn, session)
+        else:
+            relevancy_df = prepare_relevancy_df_llm(scrape_df)
 
-    raw_goldens = extract_and_dedupe_goldens(relevancy_table)
-    goldens = prepare_golden_scores(raw_goldens)
+        progress_bar.progress(40)  # 40% done
+        # Prepare golden scores
+        status_text.text("Extracting and preparing golden scores...")
+        raw_goldens = extract_and_dedupe_goldens(relevancy_df)
+        goldens = prepare_golden_scores(raw_goldens)
+        progress_bar.progress(60)  # 60% done
 
-    retrieval_metrics = evaluate_queries(query_table, scrape_df, goldens)
-    persist_metrics(
-        retrieval_metrics, relevancy_fqn, result_fqn, run_comment, scrape_df
-    )
+        # Evaluate queries
+        status_text.text("Evaluating queries...")
+        retrieval_metrics = evaluate_queries(query_df, scrape_df, goldens)
+        progress_bar.progress(90)  # 90% done
 
-    duration = datetime.now() - start_time
-    st.session_state.scrape_df = scrape_df
-    st.session_state.queryid_to_query = {
-        row[QUERY_ID]: row[QUERY] for row in query_table.collect()
-    }
+        # Persist results
+        status_text.text("Saving evaluation metrics...")
+        persist_metrics(
+            retrieval_metrics, relevancy_fqn, result_fqn, run_comment, scrape_df
+        )
+        progress_bar.progress(100)  # 100% done
 
-    st.success(
-        f"""
+        # Finalize
+        duration = datetime.now() - start_time
+        st.session_state.scrape_df = scrape_df
+        st.session_state.queryid_to_query = {
+            str(row[QUERY_ID]): row[QUERY] for row in query_df.collect()
+        }
+        status_text.text("Evaluation Complete!")
+
+        eval_output = f"""
             **Evaluation finished in {round(duration.total_seconds(), 1)} seconds**
-
             - **Aggregate Eval metrics** are added to `{result_fqn}`
             - **Per Query Metrics** are added to `{result_fqn}_PERQUERY`
-            """,
+            """
+        # todo (amehta): add llm relevancy table one-liner summary
+        st.success(eval_output)
+
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        raise e
+
+
+def compute_fusion_score_from_service(
+    root: Any,
+    query_df: DataFrame,
+    goldens: Dict[str, Dict[str, Dict[str, int]]],
+    params: Dict[str, Any],
+):
+    """Scrape search service with config from params for avg sdcg@10 of goldens."""
+
+    experimental_params = {DEBUG: True, SLOWMODE: True}
+    if params:
+        experimental_params[RERANK_WEIGHTS] = params
+
+    scrape_out = perform_scrape_for_autotune(
+        query_df, root, experimental_params=experimental_params
     )
 
+    avg_sdcg_10 = 0
+    total_queries = len(query_df.collect())
+    for row in query_df.collect():
+        query_id = row[QUERY_ID]
+        scraped_results = list(dict.fromkeys(scrape_out[query_id]))
+        avg_sdcg_10 += sdcg(
+            idcg_factor=st.session_state.idcg_factor,
+            results=scraped_results[:10],  # GRID_SEARCH_METRICS = "SDCG@10"
+            golden_to_score=goldens[query_id],
+        )
+    avg_sdcg_10 /= total_queries
+    st.write("Result for config:")
+    st.text(json.dumps(experimental_params, indent=4))
+    st.success(f"Avg SDCG@10: {round(avg_sdcg_10, 4)}")
+    st.divider()
+    return avg_sdcg_10
 
-def initialize_tables(session: Session) -> Tuple[Table, DataFrame]:
-    """Initialize query and scrape tables."""
-    query_table = session.table(st.session_state.queryset_fqn)
 
-    if QUERY_ID not in query_table.columns:
-        query_table = query_table.withColumn(
-            QUERY_ID, st.session_state.md5_hash(query_table[QUERY])
+def run_autotuning(
+    relevancy_fqn: str,
+    autotuning_result_fqn: str,
+    run_comment: str,
+    num_calls_to_gp_minimize: int = 21,
+) -> None:
+    """Run autotuning on scraped results against golden standards."""
+    start_time = datetime.now()
+    status_text = st.empty()
+
+    def _run_autotuning():
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        st.session_state.result_limit = AUTOTUNE_SCRAPE_LIMIT
+
+        status_text.text("Initializing tables...")
+        query_df = prepare_query_df(session)
+        # Generate relevancy table
+        progress_bar.progress(10)  # 10% done
+        status_text.text("Preparing relevancy table...")
+        if st.session_state.relevancy_provided:
+            relevancy_df = prepare_relevancy_df(relevancy_fqn, session)
+        else:
+            scrape_df = prepare_scrape_df(session)
+            # validate_scrape(scrape_df)
+            relevancy_df = prepare_relevancy_df_llm(scrape_df)
+
+        progress_bar.progress(40)  # 20% done
+        raw_goldens = extract_and_dedupe_goldens(relevancy_df)
+        goldens = prepare_golden_scores(raw_goldens)
+        progress_bar.progress(60)  # 60% done
+        compute_fusion_score_from_service_partial = functools.partial(
+            compute_fusion_score_from_service, root, query_df, goldens
         )
 
+        @skopt.utils.use_named_args(GP_SEARCH_SPACE)
+        def compute_fusion_score(
+            reranking_multiplier: float,
+            topicality_multiplier: float,
+        ):
+            params = {
+                RerankingMultiplier: reranking_multiplier,
+                EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
+                TopicalityMultiplier: topicality_multiplier,
+            }
+            # Need this formula because using gp_minimize (not maximization).
+            return 1.0 - compute_fusion_score_from_service_partial(params)
+
+        status_text.text("Finding the best parameters.. ")
+        result = skopt.gp_minimize(
+            compute_fusion_score,
+            GP_SEARCH_SPACE,
+            n_calls=num_calls_to_gp_minimize,
+            n_initial_points=NUM_OF_INITIAL_EXPLORATION,
+            x0=INITIAL_GP_POINT,
+        )
+        progress_bar.progress(90)  # 90% done
+        autotune_params = {
+            RERANK_WEIGHTS: {
+                RerankingMultiplier: result.x[0],
+                EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
+                TopicalityMultiplier: result.x[1],
+            },
+            DEBUG: True,
+            SLOWMODE: True,
+        }
+        st.write("Best Performing Config:")
+        st.success(json.dumps(autotune_params, indent=4))
+        st.success(f"Avg SDCG@10: {round(1.0 - result.fun, 4)}")
+        run_id = generate_runid()
+        optimal_scrape_df = perform_scrape_for_eval(
+            session,
+            query_df,
+            root,
+            experimental_params=autotune_params,
+            run_id=run_id,
+        )
+
+        # Evaluate queries
+        status_text.text("Evaluating queries...")
+        retrieval_metrics = evaluate_queries(query_df, optimal_scrape_df, goldens)
+
+        # Persist results
+        status_text.text("Saving evaluation metrics...")
+        persist_metrics(
+            retrieval_metrics,
+            relevancy_fqn,
+            autotuning_result_fqn,
+            run_comment,
+            optimal_scrape_df,
+            autotune=True,
+            autotuned_params=autotune_params,
+        )
+        progress_bar.progress(100)  # 100% done
+
+    # Run the autotuning process and return any error if occurs.
+    try:
+        _run_autotuning()
+
+        # Finalize
+        duration = datetime.now() - start_time
+        status_text.text("Autotuning Complete!")
+        st.success(
+            f"""
+            **Autotuning finished in {round(duration.total_seconds(), 1)} seconds**
+
+            - **Aggregate Eval metrics** are added to `{autotuning_result_fqn}`
+            - **Per Query Metrics** are added to `{autotuning_result_fqn}_PERQUERY`
+            """,
+        )
+
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        raise e
+
+
+def prepare_scrape_df(session: Session) -> DataFrame:
+    """Prepare the scrape df to choose rows for the current RUN ID."""
     scrape_table = session.table(st.session_state.scrape_fqn)
     scrape_df = scrape_table.filter(col(RUN_ID) == st.session_state.scrape_run_id)
 
-    return query_table, scrape_df
+    return scrape_df
 
 
 def validate_scrape(scrape_df: DataFrame) -> None:
@@ -620,24 +956,96 @@ def get_result_limit(scrape_df: DataFrame) -> int:
     return scrape_df.select(spmax("rank")).collect()[0][0]
 
 
-def prepare_relevancy_table(relevancy_fqn: str, session: Session) -> Table:
+def prepare_relevancy_df(relevancy_fqn: str, session: Session) -> DataFrame:
     """Prepare the relevancy table, ensuring QUERY_ID is present."""
-    relevancy_table = session.table(relevancy_fqn)
-    if QUERY_ID not in relevancy_table.columns:
-        relevancy_table = relevancy_table.withColumn(
-            QUERY_ID, st.session_state.md5_hash(relevancy_table[QUERY])
+    relevancy_df = session.table(relevancy_fqn)
+
+    if QUERY_ID in relevancy_df.columns:
+        # Ensure QUERY_ID is of string type
+        relevancy_df = relevancy_df.withColumn(
+            QUERY_ID, relevancy_df[QUERY_ID].cast("string")
         )
-    # If DOC_ID column is not provided, md5_hash the text column
-    if DOC_ID not in relevancy_table.columns:
-        relevancy_table = relevancy_table.withColumn(
+    else:
+        # Add QUERY_ID if not present
+        relevancy_df = relevancy_df.withColumn(
+            QUERY_ID, st.session_state.md5_hash(relevancy_df[QUERY])
+        )
+
+    if DOC_ID in relevancy_df.columns:
+        # Ensure DOC_ID is of string type
+        relevancy_df = relevancy_df.withColumn(
+            DOC_ID, relevancy_df[DOC_ID].cast("string")
+        )
+    else:
+        # Add DOC_ID if not present
+        relevancy_df = relevancy_df.withColumn(
             DOC_ID,
-            st.session_state.md5_hash(relevancy_table[st.session_state.css_text_col]),
+            st.session_state.md5_hash(relevancy_df[st.session_state.css_text_col]),
         )
-    return relevancy_table
+
+    return relevancy_df
+
+
+def output_prompt_col(query_col: Column, passage_col: Column) -> Column:
+    """
+    Generate a Snowpark Column with the formatted LLM judge prompt.
+    Dynamically replaces `{query}` and `{passage}` in the prompt with column values.
+    """
+    from snowflake.snowpark.functions import concat, lit
+
+    # Split the prompt into parts before and after {query} and {passage}
+    entire_prompt = get_llm_judge_prompt()
+    prompt_before_query = entire_prompt.split("{query}")[0]
+    prompt_after_query = entire_prompt.split("{query}")[1].split("{passage}")[0]
+    prompt_after_passage = entire_prompt.split("{passage}")[1]
+
+    # Concatenate parts of the prompt with column values
+    return concat(
+        lit(prompt_before_query),  # Text before {query}
+        query_col,  # Dynamic query value
+        lit(prompt_after_query),  # Text between {query} and {passage}
+        passage_col,  # Dynamic passage value
+        lit(prompt_after_passage),  # Text after {passage}
+    )
+
+
+def prepare_relevancy_df_llm(scrape_df: DataFrame) -> DataFrame:
+    if check_table_exists(st.session_state.relevancy_fqn):
+        st.success(
+            f"Using existing relevancy table {st.session_state.relevancy_fqn} which was generated for scrape run ID: {st.session_state.scrape_run_id}"
+        )
+    else:
+        temp_table_name = st.session_state.relevancy_fqn + "_temp"
+
+        scrape_df_interm = scrape_df.withColumn(
+            "prompt", output_prompt_col(col(QUERY), col(st.session_state.css_text_col))
+        )
+
+        scrape_df_interm.write.mode("overwrite").save_as_table(temp_table_name)
+
+        session.sql(f"""
+    CREATE OR REPLACE TABLE {st.session_state.relevancy_fqn} AS
+    SELECT
+        *,
+        SNOWFLAKE.CORTEX.COMPLETE(
+            'llama3.1-405b',
+            [{{'role': 'user', 'content': prompt}}],
+            {{'temperature': 0, 'top_p': 1}}
+        )['choices'][0]['messages']::VARCHAR AS LLM_JUDGE,
+        REGEXP_SUBSTR(LLM_JUDGE, 'R[a-z]*g: ([0-9])', 1, 1, 'e', 1) AS RELEVANCY
+    FROM {temp_table_name}
+    WHERE REGEXP_SUBSTR(LLM_JUDGE, 'R[a-z]*g: ([0-9])', 1, 1, 'e', 1) IS NOT NULL
+""").collect()
+        st.success(
+            f"LLM Judge generated relevancies are stored in: {st.session_state.relevancy_fqn}"
+        )
+
+    relevancy_df = session.table(st.session_state.relevancy_fqn)
+    return relevancy_df
 
 
 def extract_and_dedupe_goldens(
-    relevancy_table: Table,
+    relevancy_df: DataFrame,
 ) -> Dict[str, List[Tuple[str, int]]]:
     """Extract golden scores from the relevancy table."""
     raw_goldens: Dict[str, List[Tuple[str, int]]] = {}
@@ -647,9 +1055,11 @@ def extract_and_dedupe_goldens(
         2: lightgreen,
         3: lightgreen,
     }
-    for row in relevancy_table.collect():
+
+    relevancies = relevancy_df.collect()
+    for row in relevancies:
         rel_score = int(row[RELEVANCY])
-        query_id, doc_id = row[QUERY_ID], str(row[DOC_ID])
+        query_id, doc_id = str(row[QUERY_ID]), str(row[DOC_ID])
 
         # Dedup block:
         # Check if the current doc_id already exists for the query_id
@@ -685,6 +1095,14 @@ def prepare_golden_scores(
     raw_goldens: Dict[str, List[Tuple[str, int]]],
 ) -> Dict[str, Dict[str, Dict[str, int]]]:
     """Prepare sorted golden scores for each query."""
+    if st.session_state.relevancy_provided:
+        st.session_state.idcg_factor = max(
+            [
+                max([score for _, score in raw_goldens[query_id]] or [0])
+                for query_id in raw_goldens
+            ]
+            or [0]
+        )
     return {
         query_id: {
             doc_id: {"rank": rank, "score": score}
@@ -697,22 +1115,17 @@ def prepare_golden_scores(
 
 
 def evaluate_queries(
-    query_table: Table,
+    query_df: DataFrame,
     scrape_df: DataFrame,
     goldens: Dict[str, Dict[str, Dict[str, int]]],
 ) -> List[Dict[str, Any]]:
     """Evaluate all queries against the scraped results."""
     retrieval_metrics: List[Dict[str, Any]] = []
-    progress_bar = st.progress(0)
-    total_rows = len(query_table.collect())
-    status_text = st.empty()
-    status_text.text("Evaluation in progress.. (this may take a while)")
 
-    for i, row in enumerate(query_table.collect()):
-        progress_percentage = (i + 1) / total_rows
-        progress_bar.progress(progress_percentage)
+    queries = query_df.collect()
 
-        query_id = row[QUERY_ID]
+    for row in queries:
+        query_id = str(row[QUERY_ID])
 
         # Preserve rank ordering as you filter
         scrape_for_query_df = scrape_df.filter(col(QUERY_ID) == query_id).order_by(
@@ -724,6 +1137,7 @@ def evaluate_queries(
             dict.fromkeys(r[DOC_ID] for r in scrape_for_query_df.collect())
         )
 
+        _sdcg = functools.partial(sdcg, st.session_state.idcg_factor)
         if query_id in goldens:
             golden_to_score = goldens[query_id]
             retrieval_metrics.append(
@@ -735,18 +1149,18 @@ def evaluate_queries(
                         {HIT_RATE: hit_rate},
                         VALID_LIMITS,
                     )[HIT_RATE],
-                    NDCG: calculate_metrics(
-                        scraped_results, golden_to_score, {NDCG: ndcg}, VALID_LIMITS
-                    )[NDCG],
+                    SDCG: calculate_metrics(
+                        scraped_results,
+                        golden_to_score,
+                        {SDCG: _sdcg},
+                        VALID_LIMITS,
+                    )[SDCG],
                     PRECISION: calculate_metrics(
                         scraped_results,
                         golden_to_score,
                         {PRECISION: precision},
                         VALID_LIMITS,
                     )[PRECISION],
-                    RECALL: calculate_metrics(
-                        scraped_results, golden_to_score, {RECALL: recall}, VALID_LIMITS
-                    )[RECALL],
                 }
             )
 
@@ -758,10 +1172,15 @@ def calculate_aggregate_metrics(
     relevancy_fqn: str,
     run_comment: str,
     scrape_df: DataFrame,
+    autotune: bool = False,
+    autotuned_params: dict = {},
+    run_id: str = "",
 ) -> Dict[str, Any]:
     """Calculate aggregate metrics from retrieval metrics."""
-    return {
-        RUN_ID: st.session_state.scrape_run_id,
+    if autotune:
+        run_comment = run_comment or f"Autotuning with Params: {autotuned_params}"
+    aggregate_metrics = {
+        RUN_ID: (run_id or st.session_state.scrape_run_id),
         RUN_METADATA: {
             "Timestamp": datetime.now(),
             "QueryTable": st.session_state.queryset_fqn,
@@ -773,22 +1192,78 @@ def calculate_aggregate_metrics(
             "Comment": run_comment,
         },
         HIT_RATE: calculate_average_metrics(retrieval_metrics, HIT_RATE),
-        NDCG: calculate_average_metrics(retrieval_metrics, NDCG),
+        SDCG: calculate_average_metrics(retrieval_metrics, SDCG),
         PRECISION: calculate_average_metrics(retrieval_metrics, PRECISION),
-        RECALL: calculate_average_metrics(retrieval_metrics, RECALL),
     }
+    if autotuned_params:
+        aggregate_metrics[RUN_METADATA]["AutotunedParams"] = autotuned_params
+        aggregate_metrics[RUN_METADATA]["ScrapeTable"] = ""
+    return aggregate_metrics
 
 
 def create_display_metrics(
-    aggregate_metrics: Dict[str, Any], retrieval_metrics: List[Dict[str, Any]]
+    aggregate_metrics: Dict[str, Any],
+    retrieval_metrics: List[Dict[str, Any]],
+    run_id: str = "",
 ) -> DataFrame:
     """Create display metrics DataFrame for user interface."""
     display_data = {
-        RUN_ID: st.session_state.scrape_run_id,
+        RUN_ID: (run_id or st.session_state.scrape_run_id),
         RUN_METADATA: aggregate_metrics[RUN_METADATA],
         **compute_display_metrics(retrieval_metrics, st.session_state.result_limit),
     }
     return session.create_dataframe([display_data])
+
+
+def save_per_query_metrics(
+    retrieval_metrics: List[Dict[str, Any]], result_fqn: str
+) -> None:
+    """Save per-query metrics to the database."""
+    per_query_df = session.create_dataframe(retrieval_metrics).withColumn(
+        RUN_ID, lit(st.session_state.scrape_run_id)
+    )
+    st.session_state.retrieval_metrics_per_query_df = per_query_df
+    per_query_table_name = f"{result_fqn}_PERQUERY"
+    per_query_df.write.mode("append").save_as_table(per_query_table_name)
+
+
+def calculate_and_save_aggregate_metrics(
+    retrieval_metrics: List[Dict[str, Any]],
+    relevancy_fqn: str,
+    run_comment: str,
+    scrape_df: DataFrame,
+    result_fqn: str,
+    autotune: bool,
+    autotuned_params: Dict[str, Any],
+    run_id: str,
+) -> Dict[str, Any]:
+    aggregate_metrics = calculate_aggregate_metrics(
+        retrieval_metrics,
+        relevancy_fqn,
+        run_comment,
+        scrape_df,
+        autotune=autotune,
+        autotuned_params=autotuned_params,
+        run_id=run_id,
+    )
+    aggregate_metrics_df = session.create_dataframe([aggregate_metrics])
+    aggregate_metrics_df.write.mode("append").save_as_table(result_fqn)
+    return aggregate_metrics
+
+
+def display_aggregate_metrics(
+    aggregate_metrics: Dict[str, Any],
+    retrieval_metrics: List[Dict[str, Any]],
+    run_id: str,
+    autotune: bool,
+) -> None:
+    display_metrics_df = create_display_metrics(
+        aggregate_metrics, retrieval_metrics, run_id
+    )
+    if autotune:
+        st.session_state.autotuning_aggregate_metrics_display_df = display_metrics_df
+    else:
+        st.session_state.aggregate_metrics_display_df = display_metrics_df
 
 
 def persist_metrics(
@@ -797,34 +1272,26 @@ def persist_metrics(
     result_fqn: str,
     run_comment: str,
     scrape_df: DataFrame,
+    autotune: bool = False,
+    autotuned_params: dict[str, Any] = {},
+    run_id: str = "",
 ) -> None:
     """Persist the metrics in the database."""
 
-    # Create DataFrame for per-query metrics and save it
-    st.session_state.retrieval_metrics_per_query_df = session.create_dataframe(
-        retrieval_metrics
-    )
-    st.session_state.retrieval_metrics_per_query_df = (
-        st.session_state.retrieval_metrics_per_query_df.with_column(
-            "RUN_ID", lit(st.session_state.scrape_run_id)
-        )
-    )
-    per_query_fqn = f"{result_fqn}_PERQUERY"
-    st.session_state.retrieval_metrics_per_query_df.write.mode("append").save_as_table(
-        per_query_fqn
-    )
+    if not autotune:
+        save_per_query_metrics(retrieval_metrics, result_fqn)
 
-    # Create DataFrame for aggregate metrics and save it
-    aggregate_metrics = calculate_aggregate_metrics(
-        retrieval_metrics, relevancy_fqn, run_comment, scrape_df
+    aggregate_metrics = calculate_and_save_aggregate_metrics(
+        retrieval_metrics,
+        relevancy_fqn,
+        run_comment,
+        scrape_df,
+        result_fqn,
+        autotune,
+        autotuned_params,
+        run_id,
     )
-    retrieval_metrics_df = session.create_dataframe([aggregate_metrics])
-    retrieval_metrics_df.write.mode("append").save_as_table(result_fqn)
-
-    # Display aggregate metrics to the user
-    st.session_state.aggregate_metrics_display_df = create_display_metrics(
-        aggregate_metrics, retrieval_metrics
-    )
+    display_aggregate_metrics(aggregate_metrics, retrieval_metrics, run_id, autotune)
 
 
 def validate_scrape_fqn(must_exist: bool) -> None:
@@ -851,6 +1318,14 @@ def process_obtain_scrape() -> None:
         f"Enter Input Scrape table: We will fetch the scrape from this table with the given run ID. Required columns = [{', '.join(required_scrape_cols)}]",
         placeholder=TABLE_INPUT_PLACEHOLDER,
     )
+    st.session_state.result_limit = st.number_input(
+        "Result Limit (k): Cortex Search will retrive top k results for the queries",
+        placeholder="10",
+        step=1,
+        value=10,
+        min_value=1,
+        max_value=100,
+    )
     st.session_state.scrape_run_id = st.text_input(
         "Enter scrape Run ID: Unique ID to identify the existing scrape",
         placeholder="unique RUN_ID from the scrape table",
@@ -860,49 +1335,19 @@ def process_obtain_scrape() -> None:
         st.session_state.scrape_ready = True
 
 
-def process_generate_scrape() -> None:
+def process_generate_scrape(db: str, schema: str) -> None:
     """Process scrape generation based on user input."""
-    st.session_state.scrape_fqn = st.text_input(
-        "Choose a name for your Scrape table: Generated Scrape will be stored in this table",
-        placeholder=TABLE_INPUT_PLACEHOLDER,
-    )
-    st.session_state.result_limit = st.number_input(
-        "Result Limit (k): Cortex Search will retrive top k results for the queries",
-        placeholder="10",
-        step=1,
-        value=10,
-        min_value=1,
-        max_value=100,
-    )
-    if (
-        st.button("Generate Scrape") and st.session_state.scrape_fqn != ""
-    ):  # We need this button, because we're autofilling the scrape_fqn value
-        st.session_state.scrape_run_id = generate_runid()
-        if check_table_exists(st.session_state.scrape_fqn):
-            st.markdown(
-                f"""
-                <div style='background-color: yellow; padding: 10px;'>
-                    <strong>Warning!</strong> Scrape Table `{st.session_state.scrape_fqn}` exists. Will append the generated scrape.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            validate_scrape_fqn(must_exist=True)
-        else:
-            validate_scrape_fqn(must_exist=False)
-
-        generate_and_store_scrape(session, root)
-        st.session_state.scrape_ready = True
+    st.session_state.scrape_fqn = f"{db}.{schema}.css_scrape"
+    st.session_state.result_limit = 10
+    generate_and_store_scrape(session, root)
+    st.session_state.scrape_ready = True
 
 
 def initialize_session_state() -> None:
     session_defaults = {
-        "provide_scrape_clicked": False,
-        "generate_scrape_clicked": False,
         "scrape_ready": False,
-        "css_id_given": False,
-        "css_id_clicked": False,
         "scrape_fqn": "",
+        "scrape_for_autotune_relevancy": False,
         "scrape_run_id": "",
         "result_limit": -1,
         "aggregate_metrics_display_df": "",
@@ -917,6 +1362,12 @@ def initialize_session_state() -> None:
         "prev_css_id_col": "",
         "css_id_col": "",
         "k_value": 5,
+        "idcg_factor": 3.0,
+        "relevancy_btn_clicked": False,
+        "relevancy_provided": False,
+        "run_evaluation": False,
+        "run_autotuning": False,
+        "autotuning_aggregate_metrics_display_df": "",
     }
     for key, value in session_defaults.items():
         if key not in st.session_state:
@@ -950,33 +1401,50 @@ def collect_input_fields() -> None:
     )
     st.markdown(
         """
-        Do you have a Document ID column in your datasets? 
+            Do you have a relevancy table for your queries? 
 
-        _This will be used to uniquely identify documents_
-        """
+            _The relevancy score for <query, document> pair will be used to compare our retrieval results_
+            """
     )
+    required_relevancy_cols = set(RELEVANCY_TABLE_COLUMNS)
 
+    st.session_state.relevancy_fqn = ""
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Yes", key="id_yes"):
-            st.session_state.css_id_given = True
-            st.session_state.css_id_clicked = True
-            refresh_state_to_pre_scrape()
-
+        if st.button("Yes", key="rel_yes"):
+            st.session_state.relevancy_provided = True
+            st.session_state.relevancy_btn_clicked = True
+            st.session_state.run_evaluation = False
+            st.session_state.run_autotuning = False
     with col2:
-        if st.button("No", key="id_no"):
-            st.session_state.css_id_given = False
-            st.session_state.css_id_clicked = True
-            refresh_state_to_pre_scrape()
+        if st.button("No", key="rel_no"):
+            st.session_state.relevancy_provided = False
+            st.session_state.relevancy_btn_clicked = True
+            st.session_state.run_evaluation = False
+            st.session_state.run_autotuning = False
 
-    if not st.session_state.css_id_clicked:
+    if st.session_state.relevancy_provided:
+        st.session_state.relevancy_fqn = st.text_input(
+            f"Enter Relevancy table. This table which should have ground truth labels for the queries. Required columns = [{', '.join(required_relevancy_cols)}]",
+            placeholder=TABLE_INPUT_PLACEHOLDER,
+        )
+        if st.session_state.relevancy_fqn == "":
+            st.stop()
+
+    if st.session_state.css_fqn == "" or st.session_state.queryset_fqn == "":
         st.stop()
 
-    if st.session_state.css_id_given:
-        st.session_state.css_id_col = st.text_input(
-            "Enter the ID column name used in Cortex Search Service: All the IDs must be unique",
-            disabled=(not st.session_state.css_id_given),
+    st.session_state.css_text_col = get_search_column().upper()
+    required_relevancy_cols.add(st.session_state.css_text_col)
+    if st.session_state.relevancy_provided:
+        validate_table(
+            fqn=st.session_state.relevancy_fqn,
+            fqn_name="Relevancy table",
+            session=session,
+            must_exist=True,
+            required_cols=required_relevancy_cols,
         )
+        validate_doc_id_col(st.session_state.relevancy_fqn)
 
 
 def all_required_inputs_provided():
@@ -984,13 +1452,9 @@ def all_required_inputs_provided():
     base_requirements = [
         st.session_state.css_fqn,
         st.session_state.queryset_fqn,
+        st.session_state.relevancy_btn_clicked,
     ]
 
-    # If css_id_given is True, css_id_col must also be provided
-    if st.session_state.css_id_given:
-        base_requirements.append(st.session_state.css_id_col)
-
-    # Return True only if all required inputs are provided
     return all(base_requirements)
 
 
@@ -1014,11 +1478,6 @@ def validate_inputs():
     validate_css(
         st.session_state.css_fqn,
     )
-
-    if st.session_state.css_id_given:
-        assert validate_css_id_col(), f"ID column = {st.session_state.css_id_col} does not exist for the Cortex Search Service = {st.session_state.css_fqn}"
-
-    st.session_state.css_text_col = get_search_column().upper()
     assert (
         len(st.session_state.css_text_col) > 0
     ), "Search column name for the Cortex Search Service is empty."
@@ -1046,115 +1505,45 @@ def extract_db_and_schema_from_fqn() -> List[str]:
 def refresh_state_to_pre_scrape():
     st.session_state.scrape_ready = False
     st.session_state.aggregate_metrics_display_df = ""
+    st.session_state.autotuning_aggregate_metrics_display_df = ""
     st.session_state.retrieval_metrics_per_query_df = ""
     st.session_state.scrape_df = ""
     st.session_state.rel_scores = {}
     st.session_state.colors = {}
 
 
-def handle_scrape_input(db: str, schema: str):
-    st.markdown(
-        """
-        Do you have a scrape?
-        A scrape contains the Cortex Search results for all the queries provided in the Query Table
-        
-        _Consider clicking No if you're a first time user_
-        """
-    )
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("Yes"):
-            st.session_state.provide_scrape_clicked = True
-            st.session_state.generate_scrape_clicked = False
-            refresh_state_to_pre_scrape()
-
-    with col2:
-        if st.button("No"):
-            st.session_state.generate_scrape_clicked = True
-            st.session_state.provide_scrape_clicked = False
-            refresh_state_to_pre_scrape()
-
-    if (
-        st.session_state.provide_scrape_clicked
-        or st.session_state.generate_scrape_clicked
-    ):
-        process_scrape_workflow(db, schema)
+def process_scrape_workflow(db: str, schema: str, autotune: bool = False):
+    process_eval_input(db, schema, autotune=autotune)
 
 
-def process_scrape_workflow(db: str, schema: str):
-    if st.session_state.provide_scrape_clicked and not st.session_state.scrape_ready:
-        process_obtain_scrape()
-
-    elif st.session_state.generate_scrape_clicked and not st.session_state.scrape_ready:
-        process_generate_scrape()
-
-    if st.session_state.scrape_ready:
-        st.success(
-            f"Using scrape from table {st.session_state.scrape_fqn} with Run ID = {st.session_state.scrape_run_id}"
-        )
-        process_eval_input(db, schema)
-
-
-def process_eval_input(db, schema):
+def process_eval_input(db, schema, autotune=False):
     required_relevancy_cols = set(RELEVANCY_TABLE_COLUMNS)
-    if st.session_state.css_id_given:
-        required_relevancy_cols.add(DOC_ID)
-    else:
-        required_relevancy_cols.add(st.session_state.css_text_col)
+    required_relevancy_cols.add(st.session_state.css_text_col)
 
-    relevancy_fqn = st.text_input(
-        f"Enter Relevancy table. This table which should have ground truth labels for the queries. Required columns = [{', '.join(required_relevancy_cols)}]",
-        placeholder=TABLE_INPUT_PLACEHOLDER,
-    )
-    result_fqn = st.text_input(
-        "Choose a name for your Metrics Table: Generated Evaluation Metrics will be appended in this table",
-        placeholder=TABLE_INPUT_PLACEHOLDER,
-        value=f"{db}.{schema}.CORTEX_SEARCH_METRICS",
-    )
-    run_comment = st.text_input("Add optional note", placeholder="stored as text")
-
-    if st.button("Run Eval"):
-        if (
-            relevancy_fqn == ""
-            or result_fqn == ""
-            or st.session_state.scrape_run_id == ""
-        ):
-            st.stop()
-
-        validate_table(
-            fqn=relevancy_fqn,
-            fqn_name="Relevancy table",
-            session=session,
-            must_exist=True,
-            required_cols=required_relevancy_cols,
+    result_fqn = f"{db}.{schema}.css_metrics"
+    # run_comment = st.text_input("Add optional note", placeholder="stored as text")
+    run_comment = "simple"
+    if st.session_state.run_evaluation or not st.session_state.relevancy_provided:
+        st.session_state.scrape_run_id = generate_runid()
+        process_generate_scrape(db, schema)
+    if st.session_state.scrape_ready or (
+        st.session_state.run_autotuning or st.session_state.relevancy_provided
+    ):
+        st.success(
+            f"""
+            Scrape Stored in:
+            - **Table:** {st.session_state.scrape_fqn}
+            - **Run ID:** {st.session_state.scrape_run_id}"""
         )
+        if not st.session_state.relevancy_provided:
+            st.session_state.relevancy_fqn = (
+                f"{db}.{schema}.llm_rel_{st.session_state.scrape_run_id}"
+            )
 
-        if check_table_exists(result_fqn):
-            validate_table(
-                fqn=result_fqn,
-                fqn_name="Metrics table",
-                session=session,
-                must_exist=True,
-                required_cols=set(METRICS_TABLE_COLUMNS),
-            )
-            st.markdown(
-                f"""
-                <div style='background-color: yellow; padding: 10px;'>
-                    <strong>Warning!</strong> Metrics Table {result_fqn} exists. Will append the generated metrics.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        if autotune:
+            run_autotuning(st.session_state.relevancy_fqn, result_fqn, run_comment)
         else:
-            validate_table(
-                fqn=result_fqn,
-                fqn_name="Metrics table",
-                session=session,
-                must_exist=False,
-            )
-
-        run_eval(relevancy_fqn, result_fqn, run_comment)
+            run_eval(st.session_state.relevancy_fqn, result_fqn, run_comment)
 
 
 def eval_results_are_ready():
@@ -1166,9 +1555,17 @@ def eval_results_are_ready():
     )
 
 
-def display_eval_results():
-    show_aggregate_results()
-    show_query_level_results()
+def autotuning_results_are_ready():
+    return st.session_state.autotuning_aggregate_metrics_display_df != ""
+
+
+def display_eval_results(autotune: bool = False):
+    show_aggregate_results(autotune)
+    if not autotune:
+        show_query_level_results()
+
+    st.session_state.run_evaluation = False
+    st.session_state.run_autotuning = False
 
 
 def extract_value_from_dict(debug_signals: str, key: str) -> Optional[Any]:
@@ -1180,7 +1577,7 @@ def extract_value_from_dict(debug_signals: str, key: str) -> Optional[Any]:
 
 
 def extract_relevancy_score(row: Dict[str, Any]) -> Union[int, str]:
-    query_id = row[QUERY_ID]
+    query_id = str(row[QUERY_ID])
     doc_id = str(row[DOC_ID])
     score = st.session_state.rel_scores.get(query_id, {}).get(doc_id, None)
 
@@ -1190,8 +1587,7 @@ def extract_relevancy_score(row: Dict[str, Any]) -> Union[int, str]:
 def get_metrics_for_k(df: pd.DataFrame, k: str) -> Tuple[int]:
     """Fetches the metric values for the given k from the DataFrame."""
     metrics = (
-        df[f"NDCG@{k}"].iloc[0],
-        df[f"RECALL@{k}"].iloc[0],
+        df[f"SDCG@{k}"].iloc[0],
         df[f"PRECISION@{k}"].iloc[0],
         df[f"HIT_RATE@{k}"].iloc[0],
     )
@@ -1199,16 +1595,10 @@ def get_metrics_for_k(df: pd.DataFrame, k: str) -> Tuple[int]:
 
 
 def display_english_metrics(df: pd.DataFrame, k_value: str) -> None:
-    """Displays the metrics with explanations for a chosen k."""
-    ndcg_value, recall_value, precision_value, hit_rate_value = get_metrics_for_k(
-        df, k_value
-    )
+    """Displays the metrics with explanations for  a chosen k."""
+    sdcg_value, precision_value, hit_rate_value = get_metrics_for_k(df, k_value)
     st.write(
-        f"**NDCG@{k_value} is {ndcg_value}** - Normalized Discounted Cumulative Gain (NDCG) measures the effectiveness of a search algorithm based on the positions of relevant results. Ranges from 0 (worst) to 1 (best)."
-    )
-
-    st.write(
-        f"**Recall@{k_value} is {recall_value}** which means that on average for all queries, {recall_value*100}% of the relevant results were successfully retrieved in the top {k_value} results."
+        f"**SDCG@{k_value} is {sdcg_value}** - Standardized Discounted Cumulative Gain (SDCG) measures the effectiveness of a search algorithm based on the positions of relevant results. Ranges from 0 (worst) to 1 (best)."
     )
 
     st.write(
@@ -1220,13 +1610,16 @@ def display_english_metrics(df: pd.DataFrame, k_value: str) -> None:
     )
 
 
-def show_aggregate_results() -> None:
+def show_aggregate_results(autotune: bool = False) -> None:
     # st.header("Evaluation Results", divider=True)
     st.header("Section: Static results", divider=True)
 
-    metrics_display_aggregate = (
-        st.session_state.aggregate_metrics_display_df.to_pandas()
+    aggregate_metrics_display_df = (
+        st.session_state.autotuning_aggregate_metrics_display_df
+        if autotune
+        else st.session_state.aggregate_metrics_display_df
     )
+    metrics_display_aggregate = aggregate_metrics_display_df.to_pandas()
     metrics_display_aggregate[COMMENT] = metrics_display_aggregate[RUN_METADATA].apply(
         extract_value_from_dict, key="Comment"
     )
@@ -1247,7 +1640,7 @@ def show_aggregate_results() -> None:
         """,
         divider=True,
     )
-    desired_order = [NDCG, RECALL, HIT_RATE, PRECISION]
+    desired_order = [SDCG, HIT_RATE, PRECISION]
     metrics_df = pd.DataFrame(metrics_data, index=[f"k={k}" for k in k_values])
     metrics_df = metrics_df[desired_order]
     # You can't order columns as part of st.dataframe here, because we want metrics to be rows and not columns
@@ -1359,8 +1752,7 @@ def show_query_level_results() -> None:
         column_order=[
             QUERY,
             QUERY_ID,
-            f"{NDCG}@{k_value}",
-            f"{RECALL}@{k_value}",
+            f"{SDCG}@{k_value}",
             f"{HIT_RATE}@{k_value}",
             f"{PRECISION}@{k_value}",
         ],
@@ -1404,10 +1796,35 @@ def main():
 
     db, schema = extract_db_and_schema_from_fqn()
 
-    handle_scrape_input(db, schema)
+    st.markdown(
+        """
+        Would you like to run Evaluation or Autotuning
+        """
+    )
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("Run Evaluation"):
+            st.session_state.run_evaluation = True
+            st.session_state.run_autotuning = False
+            refresh_state_to_pre_scrape()
+
+    with col2:
+        if st.button("Run Autotuning"):
+            st.session_state.run_autotuning = True
+            st.session_state.run_evaluation = False
+            refresh_state_to_pre_scrape()
+
+    if st.session_state.run_evaluation:
+        process_eval_input(db, schema, autotune=False)
+
+    elif st.session_state.run_autotuning:
+        process_eval_input(db, schema, autotune=True)
 
     if eval_results_are_ready():
         display_eval_results()
+    if autotuning_results_are_ready():
+        display_eval_results(autotune=True)
 
 
 if __name__ == "__main__":
