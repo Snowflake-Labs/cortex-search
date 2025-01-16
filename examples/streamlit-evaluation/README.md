@@ -1,6 +1,6 @@
 # Tutorial: Evaluating Cortex Search Quality with Streamlit
 
-_Last updated: Nov 21, 2024_
+_Last updated: Jan 15, 2024_
 
 This tutorial walks you through Cortex Search Quality evaluation in a Streamlit-in-Snowflake app. By the end of this tutorial, you will have generated and run a quantitative evaluation of search quality on your use-case for a given Cortex Search Service.
 
