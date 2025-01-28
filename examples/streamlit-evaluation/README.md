@@ -48,10 +48,12 @@ Now that you have these three objects, you’re ready to get started with the ev
 ## Step 1: Create the Evaluation Streamlit-in-Snowflake App
 
 * Create a new Streamlit-in-Snowflake App. For help on creating a Streamlit in Snowflake application, see [here](https://docs.snowflake.com/en/developer-guide/streamlit/create-streamlit-ui).  
-* Install the following packages in the Streamlit app:  
-  * `matplotlib` \>= 3.7.2  
-  * `pandas` \>= 2.0.3  
-  * `snowflake` \>= 0.13.0  
+* Install the following packages in the Streamlit app:
+  Python: \>= 3.11
+  * `snowflake`
+  * `streamlit`
+  * `snowflake-snowpark-python` 
+  * `scikit-optimize` \>= 0.9.0
 * Copy and paste the contents of the [eval.py file here](https://github.com/Snowflake-Labs/cortex-search/blob/main/examples/streamlit-evaluation/eval.py) into your new application and click `Run`.
 
 ## Step 2: Run the app
