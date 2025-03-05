@@ -37,7 +37,7 @@ DEBUG_SIGNALS = "DEBUG_SIGNALS"
 RESPONSE_RESULTS = "RESPONSE_RESULTS"
 QUERY_ID = "QUERY_ID"
 QUERY = "QUERY"
-CSS = "Cortex Search Service"
+CSS = "CORTEX SEARCH SERVICE"
 DEBUG_PER_RESULT = "@DEBUG_PER_RESULT"
 HIT_RATE = "HIT_RATE"
 SDCG = "SDCG"
@@ -187,8 +187,8 @@ def get_llm_judge_prompt():
 def hit_rate(results: List[str], golden_to_score: Dict[str, Dict[str, int]]) -> int:
     """Calculate hit rate for search results."""
     for result in results:
-        if result in golden_to_score:
-            return 1 if golden_to_score[result]["score"] > 0 else 0
+        if result in golden_to_score and golden_to_score[result]["score"] > 0:
+            return 1
     return 0
 
 
@@ -609,7 +609,9 @@ def perform_scrape(
             columns=columns + st.session_state.additional_columns,
             filter=st.session_state.filter,
             # debug set to True to display debug signals
-            experimental=experimental_params if experimental_params else {DEBUG: True},
+            experimental=experimental_params
+            if experimental_params
+            else {DEBUG: True, SLOWMODE: True},
         )
         scrape_out[query_id] = {
             QUERY: query,
@@ -785,13 +787,10 @@ def compute_fusion_score_from_service(
     root: Any,
     query_df: DataFrame,
     goldens: Dict[str, Dict[str, Dict[str, int]]],
-    params: Dict[str, Any],
+    write_result: bool,
+    experimental_params: Dict[str, Any],
 ):
     """Scrape search service with config from params for avg sdcg@10 of goldens."""
-
-    experimental_params = {DEBUG: True, SLOWMODE: True}
-    if params:
-        experimental_params[RERANK_WEIGHTS] = params
 
     scrape_out = perform_scrape_for_autotune(
         query_df, root, experimental_params=experimental_params
@@ -808,10 +807,11 @@ def compute_fusion_score_from_service(
             golden_to_score=goldens[query_id],
         )
     avg_sdcg_10 /= total_queries
-    st.write("Result for config:")
-    st.text(json.dumps(experimental_params, indent=4))
-    st.success(f"Avg SDCG@10: {round(avg_sdcg_10, 4)}")
-    st.divider()
+    if write_result:
+        st.write("Result for config on test set:")
+        st.text(json.dumps(experimental_params, indent=4))
+        st.success(f"Avg SDCG@10 on Test Set: {round(avg_sdcg_10, 4)}")
+        st.divider()
     return avg_sdcg_10
 
 
@@ -832,6 +832,7 @@ def run_autotuning(
 
         status_text.text("Initializing tables...")
         query_df = prepare_query_df(session)
+        optimized_query_df, test_query_df = query_df.random_split([0.8, 0.2])
         # Generate relevancy table
         progress_bar.progress(10)  # 10% done
         status_text.text("Preparing relevancy table...")
@@ -846,9 +847,14 @@ def run_autotuning(
         raw_goldens = extract_and_dedupe_goldens(relevancy_df)
         goldens = prepare_golden_scores(raw_goldens)
         progress_bar.progress(60)  # 60% done
-        compute_fusion_score_from_service_partial = functools.partial(
-            compute_fusion_score_from_service, root, query_df, goldens
+        compute_optimized_fusion_score_from_service_partial = functools.partial(
+            compute_fusion_score_from_service, root, optimized_query_df, goldens, False
         )
+        compute_test_fusion_score_from_service_partial = functools.partial(
+            compute_fusion_score_from_service, root, test_query_df, goldens, True
+        )
+
+        params_to_test_sdcg = dict()
 
         @skopt.utils.use_named_args(GP_SEARCH_SPACE)
         def compute_fusion_score(
@@ -856,15 +862,26 @@ def run_autotuning(
             topicality_multiplier: float,
         ):
             params = {
-                RerankingMultiplier: reranking_multiplier,
-                EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
-                TopicalityMultiplier: topicality_multiplier,
+                RERANK_WEIGHTS: {
+                    RerankingMultiplier: reranking_multiplier,
+                    EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
+                    TopicalityMultiplier: topicality_multiplier,
+                },
+                DEBUG: True,
+                SLOWMODE: True,
             }
+
+            status_text.text("Scraping on Train Set:")
+            optimized_sdcg = compute_optimized_fusion_score_from_service_partial(params)
+            status_text.text("Scraping on Test Set:")
+            test_sdcg = compute_test_fusion_score_from_service_partial(params)
+            params_to_test_sdcg[json.dumps(params, indent=4)] = test_sdcg
+
             # Need this formula because using gp_minimize (not maximization).
-            return 1.0 - compute_fusion_score_from_service_partial(params)
+            return 1.0 - optimized_sdcg
 
         status_text.text("Finding the best parameters.. ")
-        result = skopt.gp_minimize(
+        _ = skopt.gp_minimize(
             compute_fusion_score,
             GP_SEARCH_SPACE,
             n_calls=num_calls_to_gp_minimize,
@@ -872,24 +889,20 @@ def run_autotuning(
             x0=INITIAL_GP_POINT,
         )
         progress_bar.progress(90)  # 90% done
-        autotune_params = {
-            RERANK_WEIGHTS: {
-                RerankingMultiplier: result.x[0],
-                EmbeddingMultiplier: DEFAULT_EMBEDDING_MULTIPLIER,
-                TopicalityMultiplier: result.x[1],
-            },
-            DEBUG: True,
-            SLOWMODE: True,
-        }
+        autotune_params_json = max(
+            params_to_test_sdcg.keys(), key=lambda k: params_to_test_sdcg[k]
+        )
         st.write("Best Performing Config:")
-        st.success(json.dumps(autotune_params, indent=4))
-        st.success(f"Avg SDCG@10: {round(1.0 - result.fun, 4)}")
+        st.success(autotune_params_json)
+        st.success(
+            f"Avg SDCG@10 on Test Set: {round(params_to_test_sdcg[autotune_params_json], 4)}"
+        )
         run_id = generate_runid()
         optimal_scrape_df = perform_scrape_for_eval(
             session,
             query_df,
             root,
-            experimental_params=autotune_params,
+            experimental_params=json.loads(autotune_params_json),
             run_id=run_id,
         )
 
@@ -906,7 +919,7 @@ def run_autotuning(
             run_comment,
             optimal_scrape_df,
             autotune=True,
-            autotuned_params=autotune_params,
+            autotuned_params=json.loads(autotune_params_json),
         )
         progress_bar.progress(100)  # 100% done
 
@@ -1602,11 +1615,11 @@ def display_english_metrics(df: pd.DataFrame, k_value: str) -> None:
     )
 
     st.write(
-        f"**Hit Rate@{k_value} is {hit_rate_value}** which means that in {hit_rate_value*100}% of queries, at least one relevant result was present in the top {k_value} retrieved items."
+        f"**Hit Rate@{k_value} is {hit_rate_value}** which means that in {hit_rate_value * 100}% of queries, at least one relevant result was present in the top {k_value} retrieved items."
     )
 
     st.write(
-        f"**Precision@{k_value} is {precision_value}** which means that {precision_value*100}% of the documents retrieved in the top {k_value} results were relevant."
+        f"**Precision@{k_value} is {precision_value}** which means that {precision_value * 100}% of the documents retrieved in the top {k_value} results were relevant."
     )
 
 
