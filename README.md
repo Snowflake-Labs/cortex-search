@@ -12,7 +12,7 @@ The `examples` directory showcases several Cortex Search usage patterns. Navigat
 3. [examples/streamlit-ai-search](examples/streamlit-ai-serach) searching for documents in a streamlit application with Cortex Search as the search backend.
 4. [examples/streamlit-chat](examples/streamlit-chat) end-to-end RAG chatbot in Streamlit-in-Snowflake using Cortex LLM functions for chat response generation and Cortex Search for retrieval.
 5. [examples/sql](examples/sql) examples calling Cortex Search from a SQL environment (e.g., Snowflake Worksheet)
-   - [examples/sql](examples/sql/batch_sproc.sql) 
+   - [examples/sql](examples/sql/batch_sproc.sql) calling Cortex Search from a SQL SProc with high concurrency for "batch" use-cases, e.g., on a with a Snowflake table containing a column of query values
 
 ## License
 
