@@ -12,7 +12,7 @@ First, clone this repository to your local machine using git and navigate to thi
 
 ```
 git clone https://github.com/snowflake-labs/cortex-search.git
-cd cortex-search/examples/streamlit-ai-search
+cd cortex-search/examples/05_streamlit_ai_search_app
 ```
 
 

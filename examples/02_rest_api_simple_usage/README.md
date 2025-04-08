@@ -16,7 +16,7 @@ First, clone this repository to your local machine using git and navigate to thi
 
 ```
 git clone https://github.com/snowflake-labs/cortex-search.git
-cd cortex-search/examples/rest
+cd cortex-search/examples/02_rest_api_simple_usage
 ```
 
 Install the necessary Python dependencies by running:

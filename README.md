@@ -6,13 +6,14 @@ This repository contains example usage of Cortex Search, currently in Private Pr
 
 The `examples` directory showcases several Cortex Search usage patterns. Navigate to each of the following subdirectories for installation information and sample usage for the method of choice:
 
-1. [examples/python_sdk](examples/python_sdk) for usage via the `snowflake` [python package](https://pypi.org/project/snowflake/).
-   - [concurrent_example.py](examples/python_sdk/concurrent_example.py) calling Cortex Search serially from a Python client with high concurrency for "batch" use-cases
-2. [examples/rest](examples/rest) for usage by hitting the REST API directly via python or the command line, using RSA key pair authentication with a JWT token.
-3. [examples/streamlit-ai-search](examples/streamlit-ai-serach) searching for documents in a streamlit application with Cortex Search as the search backend.
-4. [examples/streamlit-chat](examples/streamlit-chat) end-to-end RAG chatbot in Streamlit-in-Snowflake using Cortex LLM functions for chat response generation and Cortex Search for retrieval.
-5. [examples/sql](examples/sql) examples calling Cortex Search from a SQL environment (e.g., Snowflake Worksheet)
-   - [examples/sql](examples/sql/batch_sproc.sql) calling Cortex Search from a SQL SProc with high concurrency for "batch" use-cases, e.g., on a with a Snowflake table containing a column of query values
+- [01_python_simple_usage](examples/01_python_simple_usage): Simple querying of a Cortex Search Service via the `snowflake` [python package](https://pypi.org/project/snowflake/).
+- [02_rest_api_simple_usage](examples/02_rest_api_simple_usage):  Simple querying of a Cortex Search Service via the REST API
+- [03_batch_querying_from_sql](examples/03_batch_querying_from_sql): Querying a Cortex Search Service in a "batch" fashion using SQL.
+- [04_python_concurrent_queries](examples/04_python_concurrent_queries): Quering a Cortex Search Service with concurrency using the Python SDK.
+- [05_streamlit_ai_search_app](examples/05_streamlit_ai_search_app): Sample Streamlit app using Cortex Search to power a search bar. 
+- [06_streamlit_chatbot_app](examples/06_streamlit_chatbot_app): Sample Streamlit app using Cortex Search and Cortex LLM Functions to power a document chatbot.
+- [07_streamlit_search_evaluation_app](examples/07_streamlit_search_evaluation_app): Streamlit app guiding users through evaluation of the quality of a Cortex Search Service.
+- [08_multimodal_rag](examples/08_multimodal_rag): Sample notebook using Cortex Search and Cortex LLM Functions for multimodal RAG on PDFs.
 
 ## License
 
