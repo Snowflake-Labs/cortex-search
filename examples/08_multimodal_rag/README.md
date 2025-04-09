@@ -9,6 +9,6 @@ This tutorial notebook guides you through creation of a Cortex Search Service fr
   - [User-provided vector embeddings in Cortex Search](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/user-provided-vectors)
 
 ## Usage
-- Upload the [attached notebook](examples/08_multimodal_rag/cortex_search_mulitmodal.ipynb) to Snowflake using the [instructions here](https://docs.snowflake.com/en/user-guide/ui-snowsight/notebooks-create#create-a-new-notebook)
+- Upload the [attached notebook](examples/08_multimodal_rag/cortex_search_multimodal.ipynb) to Snowflake using the [instructions here](https://docs.snowflake.com/en/user-guide/ui-snowsight/notebooks-create#create-a-new-notebook)
 - Upload a set of PDFs to a snowflake internal stage
 - Follow the instructions in the notebook to embed the PDFs, OCR the PDF text, and create Cortex Search Service on the PDF embeddings plus OCR text for hybrid retrieval.
