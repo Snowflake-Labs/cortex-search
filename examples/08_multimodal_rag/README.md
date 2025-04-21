@@ -4,8 +4,7 @@ This tutorial notebook guides you through creation of a Cortex Search Service fr
 
 ## Prerequisites
 **This tutorial relies on several features currently in preview.** Before you can proceed with this tutorial, reach out to your account team to ask to enable these features for your account:
-  - [EMBED_IMAGE preview](https://docs.snowflake.com/LIMITEDACCESS/sql-reference/functions/embed_image_1024)
-  - [Multimodal COMPLETE](https://docs.snowflake.com/LIMITEDACCESS/snowflake-cortex/image-support)
+  - [EMBED_IMAGE_1024](https://docs.snowflake.com/LIMITEDACCESS/sql-reference/functions/embed_image_1024)
   - [User-provided vector embeddings in Cortex Search](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/user-provided-vectors)
 
 ## Usage
