@@ -13,7 +13,8 @@ pd.set_option("max_colwidth",None)
 CORTEX_SEARCH_DATABASE = "CORTEX_SEARCH_DB"
 CORTEX_SEARCH_SCHEMA = "PYU"
 CORTEX_SEARCH_SERVICE = "DEMO_SEC_CORTEX_SEARCH_SERVICE"
-SOURCE_DOCS_STAGE = "@CORTEX_SEARCH_DB.PYU.MULTIMODAL_DEMO_INTERNAL/raw_pdf/"
+SOURCE_DOCS_STAGE = "@CORTEX_SEARCH_DB.PYU.MULTIMODAL_DEMO_INTERNAL"
+SOURCE_DOCS_PATH = "raw_pdf"
 ######
 
 ### Default Values
@@ -178,7 +179,7 @@ def answer_question(myquestion):
 
     image_files = []
     for path in relative_paths:
-        image_files.append(f"TO_FILE('@DOCS', '{path}')")
+        image_files.append(f"TO_FILE('{SOURCE_DOCS_STAGE}', '{path}')")
     image_files_str = ",\n".join(image_files)
 
     query = f"""
@@ -198,7 +199,7 @@ def main():
     
     st.title(f":robot_face: :mag_right: Multimodal RAG Assistant")
     st.write("This is the list of documents you already have and that will be used to answer your questions:")
-    docs_available = session.sql(f"ls {SOURCE_DOCS_STAGE}").collect()
+    docs_available = session.sql(f"ls {SOURCE_DOCS_STAGE}/{SOURCE_DOCS_PATH}").collect()
     list_docs = [doc["name"] for doc in docs_available]
     for doc in list_docs:
         st.markdown(f"- {doc}")
@@ -234,7 +235,7 @@ def main():
                     st.write("Related Images:")
                     cols = st.columns(3)  # Create 3 columns for images
                     for i, path in enumerate(relative_paths):
-                        cmd2 = f"select GET_PRESIGNED_URL(@docs, '{path}', 360) as URL_LINK;"
+                        cmd2 = f"select GET_PRESIGNED_URL('{SOURCE_DOCS_STAGE}', '{path}', 360) as URL_LINK;"
                         df_url_link = session.sql(cmd2).to_pandas()
                         url_link = df_url_link._get_value(0,'URL_LINK')
                         
