@@ -14,6 +14,7 @@ The `examples` directory showcases several Cortex Search usage patterns. Navigat
 - [06_streamlit_chatbot_app](examples/06_streamlit_chatbot_app): Sample Streamlit app using Cortex Search and Cortex LLM Functions to power a document chatbot.
 - [07_streamlit_search_evaluation_app](examples/07_streamlit_search_evaluation_app): Streamlit app guiding users through evaluation of the quality of a Cortex Search Service.
 - [08_multimodal_rag](examples/08_multimodal_rag): Sample notebook and streamlit app using Cortex Search and Cortex LLM Functions for multimodal RAG on PDFs.
+- [09_multihop_rag](examples/09_multihop_rag): Sample notebook and streamlit app combining Cortex Search for document retrieval with document graph traversal for multi-hop multimodal RAG on complex PDFs.
 
 ## License
 
