@@ -7,7 +7,6 @@ This tutorial guides you through building a multi-hop RAG for complex PDFs. It c
 
 ## Usage
 - Upload the [preprocessing notebook](multihop_rag_preprocess.ipynb) to Snowflake using the [instructions here](https://docs.snowflake.com/en/user-guide/ui-snowsight/notebooks-create#create-a-new-notebook)
-- Download [sample processed documents](https://drive.google.com/drive/folders/1OKfqpAts2cXkDZ3ZwosagTJvH3cBcmbu?usp=sharing) and upload to your Snowflake stage, or use your own documents processed through the multimodal RAG pipeline
 - Follow the notebook instructions to:
   - Extract text and create multimodal vector embeddings
   - Build a multimodal Cortex Search service
