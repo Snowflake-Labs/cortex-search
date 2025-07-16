@@ -1,0 +1,9 @@
+name: multihop_rag_app_env
+channels:
+- snowflake
+dependencies:
+- streamlit
+- snowflake
+- snowflake.core
+- snowflake-ml-python
+- langchain-core
