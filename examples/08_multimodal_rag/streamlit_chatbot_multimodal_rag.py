@@ -79,8 +79,14 @@ def get_similar_chunks_search_service(query):
     """).collect()
     query_vector = list(sql_output[0].asDict().values())[0]
 
-    response = svc.search(query, COLUMNS, limit=NUM_CHUNKS,
-                            experimental={'queryEmbedding': query_vector})
+    response = svc.search(
+        multi_index_query={
+            "text": [{"text": query}],
+            "vector_main": [{"vector": query_vector}]
+        },
+        columns=COLUMNS,
+        limit=NUM_CHUNKS
+    )
 
     st.sidebar.json(response.json())
     
