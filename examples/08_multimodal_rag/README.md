@@ -7,6 +7,9 @@ This tutorial notebook guides you through creation of a Cortex Search Service fr
   - [EMBED_IMAGE_1024](https://docs.snowflake.com/LIMITEDACCESS/sql-reference/functions/embed_image_1024)
   - [Multi-index Cortex Search Services](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/multi-index-service)
 
+**Python Package Requirements:**
+  - Snowflake Python API version 1.6.0 or later (required for multi-index query syntax)
+
 ## Usage
 - Upload the [attached notebook](../08_multimodal_rag/cortex_search_multimodal.ipynb) to Snowflake using the [instructions here](https://docs.snowflake.com/en/user-guide/ui-snowsight/notebooks-create#create-a-new-notebook)
 - Upload a set of PDFs to a snowflake internal stage (sample PDFs can be found [here](https://drive.google.com/drive/folders/1bExhPiJlF9aNushnXeLLBR4m9EMaShHw?usp=sharing))
