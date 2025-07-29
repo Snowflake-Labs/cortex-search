@@ -4,8 +4,8 @@ This tutorial notebook guides you through creation of a Cortex Search Service fr
 
 ## Prerequisites
 **This tutorial relies on two preview features.** Before you can proceed with this tutorial, reach out to your account team to ask to enable these features for your account:
-  - [User-provided vector embeddings in Cortex Search](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/user-provided-vectors)
-  - [Multi-index Cortex Search Services](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/multi-index-service)
+ - [User-provided vector embeddings in Cortex Search](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/user-provided-vectors)
+ - [Multi-index Cortex Search Services](https://docs.snowflake.com/LIMITEDACCESS/cortex-search/multi-index-service)
 
 **Python Package Requirements:**
   - Snowflake Python API version 1.6.0 or later (required for multi-index query syntax)
