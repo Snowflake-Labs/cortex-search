@@ -76,7 +76,7 @@ def search_similar_documents(query: str) -> list:
     """
     # Embed the query using the same multimodal model used for image embeddings
     sql_output = session.sql(f"""
-        SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_1024('voyage-multimodal-3',
+        SELECT AI_EMBED('voyage-multimodal-3',
         '{query.replace("'", "")}')
     """).collect()
     query_vector = list(sql_output[0].asDict().values())[0]
@@ -445,7 +445,8 @@ def main():
                         # Display image in the appropriate column
                         with cols[i % 3]:
                             st.image(url_link, caption=f"Document {i+1}", use_container_width=True)
-                            st.markdown(f"**Source:** [{path}]({url_link})")
+                            filename = path.split('/')[-1] if '/' in path else path
+                            st.markdown(f"**Source:** [{filename}]({url_link})")
 
         st.session_state.messages.append({"role": "assistant", "content": response})
 
