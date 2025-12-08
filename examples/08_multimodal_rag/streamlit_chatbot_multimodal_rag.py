@@ -71,10 +71,18 @@ def init_messages():
         st.session_state.messages = []
 
 def get_similar_chunks_search_service(query):
+    
+    # Embed the query using the same multimodal model used for image embeddings
+    sql_output = session.sql(f"""
+        SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_1024('voyage-multimodal-3',
+        '{query.replace("'", "")}')
+    """).collect()
+    query_vector = list(sql_output[0].asDict().values())[0]
+
     response = svc.search(
         multi_index_query={
             "text": [{"text": query}],
-            "vector_main": [{"text": query}]
+            "vector_main": [{"vector": query_vector}]
         },
         columns=COLUMNS,
         limit=NUM_CHUNKS
